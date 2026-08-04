@@ -119,7 +119,9 @@ test("relay rate-limited: prefix check is case-sensitive (Rust always emits lowe
 // arrives as definitionEnv (camelCase), source "custom" is preserved, and the
 // env round-trips end-to-end so a save-then-edit cycle cannot erase env.
 
-const { fromRawAcpRuntimeCatalogEntry } = await import("./tauri.ts");
+const { fromRawAcpRuntimeCatalogEntry } = await import(
+  "./acpRuntimeCatalog.ts"
+);
 
 test("fromRawAcpRuntimeCatalogEntry maps definition_env to definitionEnv", () => {
   const raw = {

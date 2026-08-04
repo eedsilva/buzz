@@ -5,7 +5,7 @@
  * independently of the full e2eBridge.ts context (which requires a browser
  * environment and full Playwright setup).
  */
-import type { RawAcpRuntimeCatalogEntry } from "../shared/api/tauri.ts";
+import type { RawAcpRuntimeCatalogEntry } from "../shared/api/acpRuntimeCatalog.ts";
 
 /** In-memory store for custom harnesses saved via `save_custom_harness`. */
 export const mockCustomHarnesses = new Map<string, RawAcpRuntimeCatalogEntry>();
