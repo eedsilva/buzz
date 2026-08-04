@@ -290,8 +290,7 @@ pub struct ManagedAgentRecord {
     /// the definition, never from this field (see
     /// `effective_config::resolve_effective_config`). For a definition-less
     /// instance this field is authoritative. `#[serde(default)]` so
-    /// pre-existing records deserialize as `None` and get backfilled on
-    /// first load.
+    /// pre-existing records deserialize as `None` and get backfilled on first load.
     #[serde(default)]
     pub provider: Option<String>,
     /// Content hash of the persona at the time this agent was created — the
@@ -434,8 +433,7 @@ pub struct ManagedAgentRecord {
     /// a `provider` field, and is consulted only for definition-less records
     /// that carry no provider — after which the env-var preset is the last
     /// fallback. A linked instance's marker is never read: its definition is
-    /// authoritative. `#[serde(default)]` so records predating the field
-    /// deserialize as `None`.
+    /// authoritative. `#[serde(default)]` so records predating the field deserialize as `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_mesh: Option<RelayMeshConfig>,
 }
@@ -642,8 +640,10 @@ pub struct AcpRuntimeCatalogEntry {
     pub provider_env_var: Option<String>,
     /// Environment variable used to apply thinking effort, when supported.
     pub thinking_env_var: Option<String>,
-    /// Canonical effort values (`off|low|medium|high|max` for Goose; `None` for per-model harnesses).
+    /// Goose `off|low|medium|high|max`; `None` for per-model harnesses.
     pub accepted_effort_values: Option<Vec<String>>,
+    /// `(alias, canonical)` from `EffortNormalization::aliases`; `None` when no static vocabulary.
+    pub effort_aliases: Option<Vec<(String, String)>>,
     pub max_tokens_env_var: Option<String>,
     pub context_limit_env_var: Option<String>,
     pub max_rounds_env_var: Option<String>,

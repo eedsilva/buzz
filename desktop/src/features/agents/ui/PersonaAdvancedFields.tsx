@@ -118,6 +118,8 @@ export function PersonaAdvancedFields({
       ? (selectedRuntime?.acceptedEffortValues ?? null)
       : null;
   const harnessNativeEffortKey = selectedRuntime?.thinkingEnvVar ?? null;
+  const harnessNativeEffortAliases =
+    catalogStatus === "ready" ? (selectedRuntime?.effortAliases ?? null) : null;
   // PersonaAdvancedFields operates at "definition" scope — legacy fallback applies.
   // resolveEffortFromEnv is the single policy source; the component reads the same fn.
   const legacyEffortConsumed = React.useMemo(() => {
@@ -127,8 +129,14 @@ export function PersonaAdvancedFields({
       harnessNativeEffortKey,
       BUZZ_AGENT_THINKING_EFFORT,
       harnessNativeEffort,
+      harnessNativeEffortAliases,
     ).legacyConsumed;
-  }, [envVars, harnessNativeEffort, harnessNativeEffortKey]);
+  }, [
+    envVars,
+    harnessNativeEffort,
+    harnessNativeEffortKey,
+    harnessNativeEffortAliases,
+  ]);
 
   const effectiveHiddenKeys = React.useMemo(
     () => [
@@ -327,6 +335,7 @@ export function PersonaAdvancedFields({
       ) : harnessNativeEffort && harnessNativeEffortKey ? (
         <HarnessNativeEffortFields
           acceptedEffortValues={harnessNativeEffort}
+          effortAliases={harnessNativeEffortAliases}
           envVars={envVars}
           inheritedEnvVars={inheritedEnvVars}
           legacyEnvKey={BUZZ_AGENT_THINKING_EFFORT}

@@ -69,7 +69,7 @@ import type { EnvVarsValue } from "./EnvVarsEditor";
 import { useRequiredCredentialState } from "./useRequiredCredentialState";
 import { RunOnSummarySection } from "./RunOnSummarySection";
 import { PersonaDropdownField } from "./PersonaDropdownField";
-import { ALL_KNOWN_EFFORT_KEYS } from "./buzzAgentConfig";
+import { allKnownEffortKeys } from "../lib/agentConfigCore";
 import {
   MODEL_DISCOVERY_LOADING_VALUE,
   usePersonaModelDiscovery,
@@ -361,7 +361,7 @@ export function AgentInstanceEditDialog({
         // Gated on thinkingEnvVar, so applies to all runtimes including buzz-agent: a
         // pinned→inherit transition no longer materializes native effort into the record.
         excludePersonaEnvKeys: prospectiveRuntime?.thinkingEnvVar
-          ? [prospectiveRuntime.thinkingEnvVar, ...ALL_KNOWN_EFFORT_KEYS]
+          ? [prospectiveRuntime.thinkingEnvVar, ...allKnownEffortKeys(runtimes)]
           : undefined,
       }),
     [
@@ -374,9 +374,9 @@ export function AgentInstanceEditDialog({
       envVars,
       inheritedEnvVars,
       prospectiveRuntime?.thinkingEnvVar,
+      runtimes,
     ],
   );
-
   const {
     globalConfig,
     inheritedDefaults: {
@@ -387,8 +387,7 @@ export function AgentInstanceEditDialog({
   } = useAgentDialogDefaults({
     inheritedEnvVars,
     open,
-    nativeEffortKey: prospectiveRuntime?.thinkingEnvVar,
-    acceptedEffortValues: prospectiveRuntime?.acceptedEffortValues ?? null,
+    runtime: prospectiveRuntime,
   });
 
   // Runtime/provider-required credential state for the PROSPECTIVE post-submit runtime.
@@ -498,16 +497,17 @@ export function AgentInstanceEditDialog({
     setEnvVars(next.envVars);
   }
 
-  /** Pin↔inherit toggle: clear all effort keys (Delta-3 record-scope clear). */
+  /**
+   * Pin↔inherit toggle: unconditionally clear all effort keys (Delta-3). Gating on the
+   * pre-toggle runtime leaked legacy effort into Goose on a Claude→Goose inherit; deletes no-op if absent.
+   */
   function handleInheritHarnessChange(nextInherit: boolean) {
     setInheritHarness(nextInherit);
-    if (prospectiveRuntime?.thinkingEnvVar) {
-      setEnvVars((prev: EnvVarsValue) => {
-        const next = { ...prev };
-        for (const key of ALL_KNOWN_EFFORT_KEYS) delete next[key];
-        return next;
-      });
-    }
+    setEnvVars((prev: EnvVarsValue) => {
+      const next = { ...prev };
+      for (const key of allKnownEffortKeys(runtimes)) delete next[key];
+      return next;
+    });
   }
 
   function handleRuntimeDropdownChange(nextValue: string) {

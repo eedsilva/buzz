@@ -12,6 +12,7 @@ import {
   resolveInheritedRuntimeSubmission,
   resolveRuntimeProviderCapability,
 } from "./personaRuntimeModel.ts";
+import { allKnownEffortKeys } from "../lib/agentConfigCore.ts";
 
 // ── Phase 1B.3b re-host pinning: inherit-toggle → gate → submit ─────────────
 //
@@ -247,6 +248,61 @@ test("rehost_steadyStateInherit_localEditsStayAuthoritative", () => {
     "empty local model in steady state stays empty (runtime default), never backfilled from the persona",
   );
   assert.deepEqual(submission.envVars, { DATABRICKS_TOKEN: "tok" });
+});
+
+// ── F1: pin→inherit effort clear (kalvin P2) ────────────────────────────────
+//
+// The dialog's handleInheritHarnessChange clears every known effort key on any
+// pin↔inherit toggle. The bug was gating that clear on the PRE-toggle prospective
+// runtime: a Claude-pinned agent (no effort key) inheriting a Goose persona
+// skipped the clear, so a stale record-tier BUZZ_AGENT_THINKING_EFFORT survived
+// and the spawn bridge aliased it into Goose. The corrected handler is
+// unconditional. This test models it exactly via the real allKnownEffortKeys.
+
+// Catalog mirrors the real one: buzz-agent's native key IS the legacy key.
+const effortRuntimes = [
+  { thinkingEnvVar: "GOOSE_THINKING_EFFORT" },
+  { thinkingEnvVar: "BUZZ_AGENT_THINKING_EFFORT" },
+  { thinkingEnvVar: null },
+];
+
+// Mirror of the corrected handler: unconditional clear of every known effort key.
+function envVarsAfterInheritToggle(prevEnvVars) {
+  const next = { ...prevEnvVars };
+  for (const key of allKnownEffortKeys(effortRuntimes)) delete next[key];
+  return next;
+}
+
+test("inheritToggle_claudePinNoEffortKey_toGoosePersona_clearsLegacyEffort", () => {
+  // The regressed scenario: a Claude-pinned agent carries a legacy
+  // BUZZ_AGENT_THINKING_EFFORT (from an older save) but no native effort key.
+  // Toggling to inherit a Goose persona must strip the legacy key so it can
+  // never be aliased into Goose at spawn.
+  const cleared = envVarsAfterInheritToggle({
+    BUZZ_AGENT_THINKING_EFFORT: "high",
+    ANTHROPIC_API_KEY: "sk-keep",
+  });
+  assert.equal(
+    cleared.BUZZ_AGENT_THINKING_EFFORT,
+    undefined,
+    "legacy effort key must be cleared even when the pre-toggle runtime has no native effort key",
+  );
+  assert.equal(
+    cleared.ANTHROPIC_API_KEY,
+    "sk-keep",
+    "non-effort env keys must survive the toggle",
+  );
+});
+
+test("inheritToggle_clearsNativeAndLegacyEffort_preservesOtherKeys", () => {
+  const cleared = envVarsAfterInheritToggle({
+    GOOSE_THINKING_EFFORT: "max",
+    BUZZ_AGENT_THINKING_EFFORT: "medium",
+    UNRELATED: "keep",
+  });
+  assert.equal(cleared.GOOSE_THINKING_EFFORT, undefined);
+  assert.equal(cleared.BUZZ_AGENT_THINKING_EFFORT, undefined);
+  assert.equal(cleared.UNRELATED, "keep");
 });
 
 test("editValidity_allowlistWithEmptyList_blocksSave", () => {
