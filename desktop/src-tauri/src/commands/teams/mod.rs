@@ -25,18 +25,38 @@ fn trim_optional(value: Option<String>) -> Option<String> {
     })
 }
 
+mod adopt;
+mod pending;
+mod sharing;
+pub use adopt::add_team_from_catalog;
+pub use sharing::set_team_shared;
+
+/// Refresh the shared 30178 catalog heads of every team that includes
+/// `persona_id` as a member, after a successful persona edit.
+///
+/// `pub(crate)` so persona-edit commands can trigger a catalog refresh without
+/// crossing into the `commands::teams` private module. Best-effort: failures
+/// are logged, not returned.
+pub(crate) fn refresh_team_catalog_heads_for_persona(
+    app: &AppHandle,
+    state: &AppState,
+    persona_id: &str,
+) {
+    pending::refresh_shared_team_catalog_heads_for_persona(app, state, persona_id);
+}
+
 /// Retain a freshly authored team event in the local store, flagged for relay
 /// sync. Called inside a command's `managed_agents_store_lock`-held body after
 /// `save_teams`; the background flush loop publishes it out-of-band.
 ///
-/// Mirrors `commands::personas::retain_persona_pending`. Built-in teams are not
-/// owner-authored, so the caller skips them — this helper assumes the team is
-/// publishable. Best-effort: a failure here is logged and swallowed so a
-/// retention hiccup never blocks the disk-authoritative write.
+/// Mirrors `commands::personas::retain_persona_pending`. The caller skips
+/// built-in teams, so this assumes the team is publishable. Best-effort: a
+/// failure is logged and swallowed so a retention hiccup never blocks the
+/// disk-authoritative write.
 ///
-/// Unlike `retain_managed_agent_pending`, this has no projection-equality
-/// short-circuit: teams have no start/stop runtime churn, so a republish only
-/// happens on an actual user edit. The guard is intentionally omitted.
+/// Unlike `retain_managed_agent_pending`, no projection-equality short-circuit:
+/// teams have no start/stop runtime churn, so a republish only happens on an
+/// actual user edit.
 pub(super) fn retain_team_pending(app: &AppHandle, state: &AppState, team: &TeamRecord) {
     use crate::managed_agents::{
         persona_events::monotonic_created_at,
@@ -84,11 +104,37 @@ pub(super) fn retain_team_pending(app: &AppHandle, state: &AppState, team: &Team
 /// `(5, pubkey, d_tag)` coordinate with `pending_sync = 1`. Best-effort: a
 /// failure is logged and swallowed so a retention hiccup never blocks the
 /// disk-authoritative delete.
+///
+/// Timestamp-domination invariant: the retained 30176 head may be future-dated
+/// (`retain_team_pending` signs it with `monotonic_created_at`), and the relay
+/// only soft-deletes coordinate versions with `created_at <=` the tombstone's.
+/// So the kind:5 is signed with `monotonic_created_at(Some(head.created_at))` —
+/// the head's `created_at` read before the purge — so a future-dated head cannot
+/// survive its own tombstone. Without a head, fall back to
+/// `monotonic_created_at(None)`.
 fn tombstone_team_pending(app: &AppHandle, state: &AppState, d_tag: &str) {
+    let result = (|| -> Result<(), String> {
+        let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
+        tombstone_team_at(&scope.db_path, &scope.owner_keys, d_tag)
+    })();
+    if let Err(e) = result {
+        eprintln!("buzz-desktop: team-tombstone: {e}");
+    }
+}
+
+/// Scope-free core of [`tombstone_team_pending`], so the purge and enqueue can
+/// be asserted directly against a retention database (mirrors
+/// `pending::tombstone_team_catalog_at` for the 30178 coordinate).
+pub(super) fn tombstone_team_at(
+    db_path: &std::path::Path,
+    keys: &nostr::Keys,
+    d_tag: &str,
+) -> Result<(), String> {
     use crate::managed_agents::{
+        persona_events::monotonic_created_at,
         retention::{
-            delete_retained_event, open_retention_db, retain_event, tombstone_retention_d_tag,
-            RetainedEvent,
+            delete_retained_event, get_retained_event, open_retention_db, retain_event,
+            tombstone_retention_d_tag, RetainedEvent,
         },
         team_events::build_team_delete,
     };
@@ -97,32 +143,31 @@ fn tombstone_team_pending(app: &AppHandle, state: &AppState, d_tag: &str) {
 
     const KIND_DELETE: u32 = 5;
 
-    let result = (|| -> Result<(), String> {
-        let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
-        let pubkey = scope.owner_keys.public_key().to_hex();
-        let event = build_team_delete(d_tag, &pubkey)?
-            .sign_with_keys(&scope.owner_keys)
-            .map_err(|e| format!("failed to sign team tombstone: {e}"))?;
-        let conn = open_retention_db(&scope.db_path)?;
-        delete_retained_event(&conn, KIND_TEAM, &pubkey, d_tag)?;
-        retain_event(
-            &conn,
-            &RetainedEvent {
-                kind: KIND_DELETE,
-                pubkey,
-                // Key by the target coordinate so cross-kind d-tag tombstones
-                // occupy distinct rows (F2c).
-                d_tag: tombstone_retention_d_tag(KIND_TEAM, d_tag),
-                content: event.content.to_string(),
-                created_at: event.created_at.as_secs() as i64,
-                raw_event: event.as_json(),
-                pending_sync: true,
-            },
-        )
-    })();
-    if let Err(e) = result {
-        eprintln!("buzz-desktop: team-tombstone: {e}");
-    }
+    let pubkey = keys.public_key().to_hex();
+    let conn = open_retention_db(db_path)?;
+    // Read the retained head's created_at before the purge, then sign the
+    // kind:5 strictly past it so the relay cannot reject the deletion.
+    let prior_head =
+        get_retained_event(&conn, KIND_TEAM, &pubkey, d_tag)?.map(|row| row.created_at);
+    let event = build_team_delete(d_tag, &pubkey)?
+        .custom_created_at(monotonic_created_at(prior_head))
+        .sign_with_keys(keys)
+        .map_err(|e| format!("failed to sign team tombstone: {e}"))?;
+    delete_retained_event(&conn, KIND_TEAM, &pubkey, d_tag)?;
+    retain_event(
+        &conn,
+        &RetainedEvent {
+            kind: KIND_DELETE,
+            pubkey,
+            // Key by the target coordinate so cross-kind d-tag tombstones
+            // occupy distinct rows (F2c).
+            d_tag: tombstone_retention_d_tag(KIND_TEAM, d_tag),
+            content: event.content.to_string(),
+            created_at: event.created_at.as_secs() as i64,
+            raw_event: event.as_json(),
+            pending_sync: true,
+        },
+    )
 }
 
 #[tauri::command]
@@ -134,7 +179,9 @@ pub async fn list_teams(app: AppHandle) -> Result<Vec<TeamRecord>, String> {
             .managed_agents_store_lock
             .lock()
             .map_err(|error| error.to_string())?;
-        load_teams(&app)
+        let mut teams = load_teams(&app)?;
+        pending::project_active_team_sharing(&app, &state, &mut teams);
+        Ok(teams)
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
@@ -164,6 +211,10 @@ pub async fn create_team(input: CreateTeamRequest, app: AppHandle) -> Result<Tea
             instructions,
             persona_ids: input.persona_ids,
             is_builtin: false,
+            // View projection only — `list_teams` recomputes it from the
+            // scoped 30178 head. A new team has no catalog head yet.
+            shared: false,
+            catalog_source: None,
             source_dir: None,
             is_symlink: false,
             symlink_target: None,
@@ -197,6 +248,7 @@ pub async fn update_team(input: UpdateTeamRequest, app: AppHandle) -> Result<Tea
         let personas = load_personas(&app)?;
         ensure_persona_ids_are_active(&personas, &input.persona_ids)?;
         let mut teams = load_teams(&app)?;
+        pending::project_active_team_sharing(&app, &state, &mut teams);
         let team = teams
             .iter_mut()
             .find(|record| record.id == input.id)
@@ -213,6 +265,12 @@ pub async fn update_team(input: UpdateTeamRequest, app: AppHandle) -> Result<Tea
         // Built-in teams are not owner-authored — never publish them.
         if !updated.is_builtin {
             retain_team_pending(&app, &state, &updated);
+            // Reproject the shared 30178 head immediately so the catalog
+            // reflects the edit. Resolution failure (a member was deleted
+            // mid-edit) is treated as a projection failure — the shared head
+            // is tombstoned and the owner is notified via a typed notice.
+            // Best-effort: a retention hiccup never blocks the team edit.
+            pending::refresh_shared_team_catalog_head_resolving(&app, &state, &updated, &personas);
         }
         Ok(updated)
     })
@@ -234,6 +292,11 @@ pub async fn delete_team(id: String, app: AppHandle) -> Result<(), String> {
         // so reaching here means this team was owner-published — tombstone it. The
         // d_tag is the team id, captured before the record left the store.
         tombstone_team_pending(&app, &state, &id);
+        // The catalog projection is a separate coordinate with its own
+        // retained head, so the 30176 tombstone above does not retract it.
+        // Without this, deleting a shared team would leave a live catalog
+        // entry the owner can no longer see or unshare.
+        pending::tombstone_team_catalog_pending(&app, &state, &id);
         // Tombstone the cascaded personas too, so their orphaned kind:30175 heads
         // don't linger on the relay (F4). Each d-tag was captured pre-removal.
         for persona_d_tag in &cascaded_persona_d_tags {
@@ -245,3 +308,6 @@ pub async fn delete_team(id: String, app: AppHandle) -> Result<(), String> {
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
+
+#[cfg(test)]
+mod tests;
