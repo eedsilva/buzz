@@ -52,12 +52,6 @@ See:
 
 The chart fails at `helm install` / `helm template` time with a clear message if any of these are missing or malformed (see `templates/_validate.tpl`).
 
-When `externalPostgresql.url` is used, the database must permit the `pgcrypto`
-extension (schema bootstrap runs `CREATE EXTENSION IF NOT EXISTS pgcrypto`).
-Most managed PostgreSQL offerings allow it, but the role applying migrations
-needs the privilege to create it, or an administrator can pre-create the
-extension.
-
 ## HA (production)
 
 `replicaCount > 1` hard-requires Redis:

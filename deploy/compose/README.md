@@ -36,11 +36,6 @@ keypair.
   `buzz-admin migrate` before starting the relay when bootstrapping a fresh
   database. Auto-migration requires an image that includes embedded SQLx
   migrations.
-- PostgreSQL must allow the `pgcrypto` extension — schema bootstrap and
-  migrations run `CREATE EXTENSION IF NOT EXISTS pgcrypto` (used for
-  `gen_random_uuid()` and digest hashing). On managed PostgreSQL, ensure the
-  extension is permitted for the migration role or pre-create it as an
-  administrator.
 - The proposed NIP-FI configuration contract is future-facing; this bundle
   does not imply that the current relay parses or enforces it. See the
   [identity configuration contract](../../docs/CORPORATE_IDENTITY.md).
