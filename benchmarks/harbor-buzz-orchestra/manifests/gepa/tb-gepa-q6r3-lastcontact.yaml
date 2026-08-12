@@ -1,0 +1,45 @@
+# GEPA per-problem probe Q6 ROUND 3 (video-processing). Q6-r2 (edgebias
+# prose) failed its bar: takeoff 224 vs [219,223] — late AGAIN; prose bias
+# didn't transfer. Transcript forensics: both r1 PASSES shipped takeoff =
+# F-1 where F = first airborne frame (53 when 54 was first airborne); the
+# r2 FAIL shipped F itself (54 example / 224 hidden — one late each time).
+# Base: tb-gepa-q3-b lineage. Single variable vs r2: the event paragraph
+# rewritten as MECHANICAL ARITHMETIC, not judgment — onset index = F-1
+# (last frame of old state), offset index = G+1 (first frame of new state),
+# derive shipped numbers from the raw series by that convention and state
+# the arithmetic.
+schema_version: "1"
+condition: tb-gepa-q6r3-lastcontact
+timing_signal: true
+roster:
+  - id: mia
+    kind: orchestrator
+    role: conn
+    require_reply: true
+    count: 1
+    endpoint: deepseek-ai/Deepseek-V4-Flash
+    model_revision: deepseek/deepseek-v4-flash-20260731
+    prompt:
+      path: personas/bench/gepa/mia-v8-lastcontact.md
+      sha256: 9e99fdf4d12d24954a71f215140c66fb5729be72869f1d11ef3c5cdf41b2b0e0
+    generation:
+      thinking_effort: high
+  - id: mie
+    kind: worker
+    role: twin
+    count: 1
+    endpoint: deepseek-ai/Deepseek-V4-Flash
+    model_revision: deepseek/deepseek-v4-flash-20260731
+    prompt:
+      path: personas/bench/gepa/mie-v0.md
+      sha256: a4924e4c4507ac466a7500bb34a04a782618df41dba850b6f0f729787c48439b
+    generation:
+      thinking_effort: high
+prices:
+  deepseek-ai/Deepseek-V4-Flash:
+    input_per_million_usd: 0.14
+    cached_input_per_million_usd: 0.14
+    output_per_million_usd: 0.28
+    cache_read_rate: 0.0
+trial_budget:
+  timeout_seconds: 36000
