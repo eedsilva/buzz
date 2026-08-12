@@ -5607,29 +5607,64 @@ mod tests {
                 .await
         });
 
-        // The first publisher is blocked before canonical state capture. Model
-        // the final transition while it waits, then queue its publisher too.
-        tokio::task::yield_now().await;
+        // Prove the publisher reached the advisory lock before changing the
+        // canonical state. This is the discriminating boundary: the old
+        // implementation captured archived state before it could appear as a
+        // lock waiter, so its returned event would still contain `target`.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(\
+                         SELECT 1 FROM pg_locks \
+                         WHERE locktype = 'advisory' AND NOT granted \
+                           AND classid = (($1::bigint >> 32) & 4294967295)::oid \
+                           AND objid = ($1::bigint & 4294967295)::oid \
+                           AND objsubid = 1\
+                     )",
+                )
+                .bind(lock_key)
+                .fetch_one(&db.pool)
+                .await
+                .expect("query publication waiter");
+                if waiting {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("publisher must queue on publication lock");
+
         db.unarchive(community, &target)
             .await
             .expect("unarchive target");
-        let second_db = db.clone();
-        let second_keys = relay_keys.clone();
-        let second = tokio::spawn(async move {
-            second_db
-                .publish_nipia_archival_list_locked(community, &second_keys)
-                .await
-        });
-
         gate.commit().await.expect("release publication gate");
-        first
+
+        let (first_stored, first_inserted, _) = first
             .await
             .expect("join first publisher")
             .expect("first publish");
-        second
+        assert!(first_inserted, "queued publisher must commit a snapshot");
+        assert!(
+            first_stored.event.tags.iter().all(|tag| {
+                let parts = tag.as_slice();
+                parts.first().map(String::as_str) != Some("p")
+            }),
+            "publisher must capture canonical state only after obtaining the lock"
+        );
+
+        // A subsequent publisher must preserve the final canonical state and
+        // advance the replaceable head rather than reintroducing a tie.
+        let first_created_at = first_stored.event.created_at;
+        let (second_stored, second_inserted, _) = db
+            .publish_nipia_archival_list_locked(community, &relay_keys)
             .await
-            .expect("join second publisher")
             .expect("second publish");
+        assert!(second_inserted, "second publisher must commit a snapshot");
+        assert!(
+            second_stored.event.created_at > first_created_at,
+            "serialized publishers must allocate strictly increasing timestamps"
+        );
 
         let stored = db
             .get_latest_global_replaceable(
