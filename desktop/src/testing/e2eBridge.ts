@@ -311,6 +311,7 @@ type E2eConfig = {
     channelsReadDelayMs?: number;
     /** Number of seeded rows in the deep-history fixture. Defaults to 600. */
     deepHistoryMessageCount?: number;
+    feedReadDelayMs?: number;
     feedReadError?: string;
     canvasReadError?: string;
     /** Delay (ms) for `apply_workspace` so e2e tests can observe the
@@ -7067,6 +7068,10 @@ async function handleGetFeed(
   },
   config: E2eConfig | undefined,
 ): Promise<RawHomeFeedResponse> {
+  const feedReadDelayMs = config?.mock?.feedReadDelayMs ?? 0;
+  if (feedReadDelayMs > 0) {
+    await new Promise((resolve) => window.setTimeout(resolve, feedReadDelayMs));
+  }
   const feedReadError = config?.mock?.feedReadError;
   if (feedReadError) {
     throw new Error(feedReadError);

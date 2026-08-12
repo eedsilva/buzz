@@ -360,6 +360,29 @@ test("send a message and see it in timeline", async ({ page }) => {
   );
 });
 
+test("Inbox loading composer persists and hands off its draft", async ({
+  page,
+}) => {
+  const draft = `Inbox draft while loading ${Date.now()}`;
+  await installMockBridge(page, { feedReadDelayMs: 2_000 });
+
+  await page.goto("/");
+  const loadingInput = page.getByTestId("home-loading-inbox-composer");
+  await expect(page.getByTestId("home-loading-inbox-spinner")).toBeVisible();
+  await expect(loadingInput).toHaveAttribute("placeholder", "Write a reply…");
+  await expect(loadingInput).toBeEditable();
+  await loadingInput.fill(draft);
+  await expect(loadingInput).toHaveValue(draft);
+
+  await page.reload();
+  const restoredLoadingInput = page.getByTestId("home-loading-inbox-composer");
+  await expect(restoredLoadingInput).toHaveValue(draft);
+
+  const detail = page.getByTestId("home-inbox-detail");
+  await expect(detail.getByTestId("message-input")).toHaveText(draft);
+  await expect(restoredLoadingInput).toHaveCount(0);
+});
+
 test("long autolink wraps without widening the timeline", async ({ page }) => {
   await page.setViewportSize({ width: 800, height: 600 });
 

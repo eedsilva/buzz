@@ -26,6 +26,7 @@ import { resolveInboxFilterSelection } from "@/features/home/lib/inboxSelection"
 import { useHomeInboxReadState } from "@/features/home/useHomeInboxReadState";
 import { useHomeInboxAutoSelection } from "@/features/home/useHomeInboxAutoSelection";
 import { useHomeInboxContextMessages } from "@/features/home/useHomeInboxContextMessages";
+import { useInboxLoadingDraftHandoff } from "@/features/home/useInboxLoadingDraftHandoff";
 import { useHomePersonalInbox } from "@/features/home/useHomePersonalInbox";
 import { useInboxThreadContext } from "@/features/home/useInboxThreadContext";
 import {
@@ -456,6 +457,13 @@ export function HomeView({
     }
     return null;
   }, [filteredItems, selectedConversationId, selectedEventId]);
+  const isInboxDraftHandoffPending = useInboxLoadingDraftHandoff({
+    feedReady: Boolean(feed),
+    hasVisibleItems: filteredItems.length > 0,
+    isMessagesMode,
+    isNarrowViewport: isNarrowHomeViewport,
+    selectedItem,
+  });
   const deleteInboxMessage = React.useCallback(
     async (eventId: string) => {
       const channelId = selectedItem?.item.channelId;
@@ -573,8 +581,8 @@ export function HomeView({
     ],
   );
 
-  if (isLoading && !feed) {
-    return <HomeLoadingState />;
+  if ((isLoading && !feed) || isInboxDraftHandoffPending) {
+    return <HomeLoadingState containerRef={homeInboxRef} />;
   }
 
   if (!feed) {
