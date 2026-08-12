@@ -84,6 +84,9 @@ const DRAFT_STORE_KEY_PREFIX = "buzz-drafts.v2";
 const LEGACY_DRAFT_STORE_KEY_PREFIX = "buzz-drafts.v1";
 const MAX_DRAFTS = 100;
 
+/** Internal draft used while Inbox is still resolving its selected thread. */
+export const INBOX_LOADING_DRAFT_KEY = "__buzz-internal__:inbox-loading";
+
 /**
  * Canonicalize a relay URL for use as a storage key scope.
  * Unlike the shared `normalizeRelayUrl` (which lowercases the entire URL),
@@ -424,6 +427,79 @@ export function renameDraftEntry(
 }
 
 /**
+ * Move the provisional Inbox loading draft into a resolved conversation.
+ *
+ * The write is atomic so the full composer cannot mount between clearing the
+ * provisional key and saving the canonical key. If a canonical draft already
+ * exists, append the provisional text so neither local draft is lost.
+ */
+export function handoffInboxLoadingDraft(
+  destinationKey: string,
+  channelId: string,
+): "merged" | "migrated" | "noop" {
+  const map = readStore();
+  const provisional = map.get(INBOX_LOADING_DRAFT_KEY);
+  if (!provisional) return "noop";
+
+  const destination = map.get(destinationKey);
+  if (!destination) {
+    map.set(destinationKey, { ...provisional, channelId });
+    map.delete(INBOX_LOADING_DRAFT_KEY);
+    flushStore(map);
+    notifySubscribers();
+    return "migrated";
+  }
+
+  const provisionalContent = provisional.content.trim();
+  const destinationContent = destination.content.trim();
+  const content =
+    provisionalContent.length === 0 || provisionalContent === destinationContent
+      ? destination.content
+      : destinationContent.length === 0
+        ? provisional.content
+        : `${destination.content}\n\n${provisional.content}`;
+  const updatedAt =
+    provisional.updatedAt > destination.updatedAt
+      ? provisional.updatedAt
+      : destination.updatedAt;
+  const pendingImeta = [
+    ...destination.pendingImeta,
+    ...provisional.pendingImeta,
+  ];
+  const spoileredAttachmentUrls = [
+    ...new Set([
+      ...destination.spoileredAttachmentUrls,
+      ...provisional.spoileredAttachmentUrls,
+    ]),
+  ];
+  const mentionRefs = [
+    ...(destination.mentionRefs ?? []),
+    ...(provisional.mentionRefs ?? []).filter(
+      (candidate) =>
+        !(destination.mentionRefs ?? []).some(
+          (existing) => existing.pubkey === candidate.pubkey,
+        ),
+    ),
+  ];
+
+  map.set(destinationKey, {
+    ...destination,
+    channelId,
+    content,
+    selectionEnd: content.length,
+    selectionStart: content.length,
+    updatedAt,
+    pendingImeta,
+    mentionRefs,
+    spoileredAttachmentUrls,
+  });
+  map.delete(INBOX_LOADING_DRAFT_KEY);
+  flushStore(map);
+  notifySubscribers();
+  return "merged";
+}
+
+/**
  * Convenience: save if content or attachments are non-empty, otherwise clear.
  * Preserves existing createdAt on updates; sets it on first save.
  */
@@ -466,6 +542,7 @@ export function getAllDraftEntries(): Array<{
   draft: DraftState;
 }> {
   return [...readStore().entries()]
+    .filter(([key]) => key !== INBOX_LOADING_DRAFT_KEY)
     .sort((a, b) => b[1].updatedAt.localeCompare(a[1].updatedAt))
     .map(([key, draft]) => ({ key, draft }));
 }

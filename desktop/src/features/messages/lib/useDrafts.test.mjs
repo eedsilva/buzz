@@ -55,6 +55,8 @@ import {
   getActiveDraftEntries,
   getAllDraftEntries,
   getSentDraftEntries,
+  handoffInboxLoadingDraft,
+  INBOX_LOADING_DRAFT_KEY,
   initDraftStore,
   loadDraftEntry,
   markDraftSentEntry,
@@ -332,6 +334,56 @@ test("getAllDraftEntries_returns_all_entries_sorted_most_recently_updated_first"
 test("getAllDraftEntries_returns_empty_array_when_no_drafts", () => {
   setup("pubkey-empty");
   assert.deepEqual(getAllDraftEntries(), []);
+});
+
+test("Inbox loading draft stays internal and migrates to the resolved thread", () => {
+  setup("pubkey-inbox-loading");
+  persistDraftEntry(
+    INBOX_LOADING_DRAFT_KEY,
+    "Typed while Inbox loads",
+    "",
+    [],
+    [],
+  );
+
+  assert.deepEqual(getAllDraftEntries(), []);
+  assert.equal(
+    handoffInboxLoadingDraft("thread:root-1", "channel-1"),
+    "migrated",
+  );
+  assert.equal(loadDraftEntry(INBOX_LOADING_DRAFT_KEY), undefined);
+  const migrated = loadDraftEntry("thread:root-1");
+  assert.ok(migrated);
+  assert.equal(migrated.channelId, "channel-1");
+  assert.equal(migrated.content, "Typed while Inbox loads");
+});
+
+test("Inbox loading handoff merges with an existing local thread draft", () => {
+  setup("pubkey-inbox-loading-merge");
+  persistDraftEntry(
+    "thread:root-2",
+    "Existing local draft",
+    "channel-2",
+    [IMG_A],
+    [],
+  );
+  persistDraftEntry(
+    INBOX_LOADING_DRAFT_KEY,
+    "Typed during loading",
+    "",
+    [],
+    [],
+  );
+
+  assert.equal(
+    handoffInboxLoadingDraft("thread:root-2", "channel-2"),
+    "merged",
+  );
+  const merged = loadDraftEntry("thread:root-2");
+  assert.ok(merged);
+  assert.equal(merged.content, "Existing local draft\n\nTyped during loading");
+  assert.deepEqual(merged.pendingImeta, [IMG_A]);
+  assert.equal(loadDraftEntry(INBOX_LOADING_DRAFT_KEY), undefined);
 });
 
 // ── channelId correctness on key switch ──────────────────────────────────────

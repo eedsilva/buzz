@@ -1,8 +1,15 @@
+import type { Ref } from "react";
 import { Skeleton } from "@/shared/ui/skeleton";
+import { Spinner } from "@/shared/ui/spinner";
+import { LoadingInboxComposer } from "@/features/home/ui/LoadingInboxComposer";
 
-export function HomeLoadingState() {
+export function HomeLoadingState({
+  containerRef,
+}: {
+  containerRef?: Ref<HTMLDivElement>;
+}) {
   return (
-    <div className="min-h-0 flex-1 overflow-hidden">
+    <div className="min-h-0 flex-1 overflow-hidden" ref={containerRef}>
       <div className="grid h-full min-h-0 w-full lg:grid-cols-[320px_minmax(0,1fr)]">
         <div className="relative overflow-hidden bg-background/60 after:absolute after:bottom-0 after:right-0 after:top-10 after:w-px after:bg-border/70 after:content-['']">
           <div className="px-5 py-2">
@@ -100,11 +107,15 @@ export function HomeLoadingState() {
           <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10">
             <div className="pointer-events-auto px-4 pb-4 sm:px-4">
               <div className="relative isolate rounded-2xl border border-border/50 bg-background/80 px-3 pb-2 pt-3 shadow-none backdrop-blur-md sm:px-4">
-                <Skeleton className="h-5 w-48" />
+                <LoadingInboxComposer />
                 <div className="mt-4 flex items-center gap-2">
                   <Skeleton className="h-8 w-8 rounded-lg" />
                   <Skeleton className="h-8 w-8 rounded-lg" />
-                  <Skeleton className="ml-auto h-8 w-20 rounded-full" />
+                  <Spinner
+                    aria-label="Loading Inbox"
+                    className="ml-auto h-5 w-5 border-2 text-muted-foreground"
+                    data-testid="home-loading-inbox-spinner"
+                  />
                 </div>
               </div>
             </div>
