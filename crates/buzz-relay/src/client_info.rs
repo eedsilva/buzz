@@ -43,6 +43,11 @@
 //! which is what lets clients add fields (mobile already sends `app-build`,
 //! `os-version`, and `os-api`) without a coordinated relay deploy.
 
+use std::{
+    collections::HashMap,
+    sync::{Mutex, OnceLock},
+};
+
 use axum::http::HeaderMap;
 use buzz_core::client_identity::{
     ClientApp, ClientPlatform, CLIENT_HEADER, CLIENT_HEADER_FORMAT_VERSION, MAX_APP_VERSION_LEN,
@@ -230,32 +235,50 @@ impl ClientInfo {
     }
 }
 
-/// The per-client live-connection gauge, labeled for `info`.
-///
-/// This is a **separate** series from `buzz_ws_connections_active`, which is
-/// consumed by the HPA as an unlabeled `AverageValue` target. Labeling that
-/// gauge would shard the series the autoscaler reads; this parallel gauge
-/// gives the same breakdown without touching scaling behaviour.
-///
-/// A gauge is the only metric kind emitted here, deliberately: the recorder
-/// idle-evicts gauge series, so a forged label set cannot accumulate for the
-/// process lifetime the way a counter would.
-fn active_gauge(info: Option<&ClientInfo>) -> metrics::Gauge {
-    let (app, platform, app_version) = match info {
-        Some(info) => (info.app, info.platform, info.app_version()),
-        None => (UNKNOWN_LABEL, UNKNOWN_LABEL, UNKNOWN_LABEL),
-    };
-    metrics::gauge!(
-        "buzz_client_connections_active",
-        "app" => app.to_owned(),
-        "platform" => platform.to_owned(),
-        "app_version" => app_version.to_owned()
-    )
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ClientLabels {
+    app: &'static str,
+    platform: &'static str,
+    app_version: String,
+}
+
+impl ClientLabels {
+    fn from_info(info: Option<&ClientInfo>) -> Self {
+        match info {
+            Some(info) => Self {
+                app: info.app,
+                platform: info.platform,
+                app_version: info.app_version().to_owned(),
+            },
+            None => Self {
+                app: UNKNOWN_LABEL,
+                platform: UNKNOWN_LABEL,
+                app_version: UNKNOWN_LABEL.to_owned(),
+            },
+        }
+    }
+
+    fn gauge(&self) -> metrics::Gauge {
+        metrics::gauge!(
+            "buzz_client_connections_active",
+            "app" => self.app.to_owned(),
+            "platform" => self.platform.to_owned(),
+            "app_version" => self.app_version.clone()
+        )
+    }
+}
+
+fn active_labels() -> &'static Mutex<HashMap<ClientLabels, u64>> {
+    static ACTIVE_LABELS: OnceLock<Mutex<HashMap<ClientLabels, u64>>> = OnceLock::new();
+    ACTIVE_LABELS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// Add a live connection to the per-client active gauge.
 pub fn increment_active(info: Option<&ClientInfo>) {
-    active_gauge(info).increment(1.0);
+    let labels = ClientLabels::from_info(info);
+    let mut active = active_labels().lock().unwrap_or_else(|e| e.into_inner());
+    *active.entry(labels.clone()).or_default() += 1;
+    labels.gauge().increment(1.0);
 }
 
 /// Remove a closed connection from the per-client active gauge.
@@ -263,7 +286,40 @@ pub fn increment_active(info: Option<&ClientInfo>) {
 /// Must be paired with exactly one [`increment_active`] call, or the gauge
 /// drifts.
 pub fn decrement_active(info: Option<&ClientInfo>) {
-    active_gauge(info).decrement(1.0);
+    let labels = ClientLabels::from_info(info);
+    let mut active = active_labels().lock().unwrap_or_else(|e| e.into_inner());
+    match active.get_mut(&labels) {
+        Some(count) if *count > 1 => *count -= 1,
+        Some(_) => {
+            active.remove(&labels);
+        }
+        None => {
+            debug_assert!(false, "client gauge decrement without matching increment");
+            return;
+        }
+    }
+    labels.gauge().decrement(1.0);
+}
+
+fn refresh_labels(
+    active: &HashMap<ClientLabels, u64>,
+    mut refresh: impl FnMut(&ClientLabels, u64),
+) {
+    for (labels, count) in active {
+        refresh(labels, *count);
+    }
+}
+
+/// Re-publish every label set that still has live connections.
+///
+/// The exporter may have already idle-evicted a series if this periodic task
+/// was delayed. Setting the tracked live count both refreshes an existing
+/// series and recreates an evicted one with the correct value. Holding the
+/// registry lock through each set serializes this snapshot with lifecycle
+/// increments and decrements, so no relative update can be overwritten.
+pub fn refresh_active_gauge_recency() {
+    let active = active_labels().lock().unwrap_or_else(|e| e.into_inner());
+    refresh_labels(&active, |labels, count| labels.gauge().set(count as f64));
 }
 
 /// A dictionary member's value, still in its wire form.
@@ -691,6 +747,90 @@ mod tests {
         let info = ClientInfo::from_headers(&headers).expect("parses");
         assert_eq!(info.app(), "buzz-cli");
         assert_eq!(info.app_version(), "9.9");
+    }
+
+    #[test]
+    fn active_gauge_refreshes_only_live_labels() {
+        let live = ClientLabels::from_info(Some(
+            &parse(r#"v=1, app=buzz-desktop, platform=macos, app-version="1.2.3""#).unwrap(),
+        ));
+        let retired = ClientLabels::from_info(Some(
+            &parse(r#"v=1, app=buzz-cli, platform=linux, app-version="9.8.7""#).unwrap(),
+        ));
+        let active = HashMap::from([(live.clone(), 2)]);
+        let mut refreshed = Vec::new();
+
+        refresh_labels(&active, |labels, count| {
+            refreshed.push((labels.clone(), count));
+        });
+
+        assert_eq!(refreshed, vec![(live, 2)]);
+        assert!(!refreshed.iter().any(|(labels, _)| labels == &retired));
+    }
+
+    #[test]
+    fn active_gauge_refresh_advances_idle_eviction_generation() {
+        use metrics::GaugeFn;
+        use metrics_util::registry::{GenerationalAtomicStorage, Registry};
+
+        let labels = ClientLabels::from_info(Some(
+            &parse(r#"v=1, app=buzz-desktop, platform=macos, app-version="1.2.3""#).unwrap(),
+        ));
+        let active = HashMap::from([(labels, 3)]);
+        let registry = Registry::new(GenerationalAtomicStorage::atomic());
+        let key = metrics::Key::from_name("buzz_client_connections_active");
+        let gauge = registry.get_or_create_gauge(&key, Clone::clone);
+        gauge.set(1.0);
+        let generation_before = gauge.get_generation();
+
+        refresh_labels(&active, |_, count| gauge.set(count as f64));
+
+        assert!(gauge.get_generation() > generation_before);
+        assert_eq!(
+            gauge.get_inner().load(std::sync::atomic::Ordering::Relaxed),
+            3.0_f64.to_bits()
+        );
+    }
+
+    #[test]
+    fn active_gauge_refresh_preserves_lifecycle_deltas() {
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let info = parse(r#"v=1, app=buzz-desktop, platform=macos, app-version="1.2.3""#).unwrap();
+
+        metrics::with_local_recorder(&recorder, || {
+            increment_active(Some(&info));
+            refresh_active_gauge_recency();
+            increment_active(Some(&info));
+            decrement_active(Some(&info));
+        });
+
+        let value = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .find_map(|(key, _, _, value)| {
+                let labels = key.key().labels().collect::<Vec<_>>();
+                (key.key().name() == "buzz_client_connections_active"
+                    && labels
+                        .iter()
+                        .any(|label| label.key() == "app" && label.value() == "buzz-desktop")
+                    && labels
+                        .iter()
+                        .any(|label| label.key() == "platform" && label.value() == "macos")
+                    && labels
+                        .iter()
+                        .any(|label| label.key() == "app_version" && label.value() == "1.2"))
+                .then_some(value)
+            })
+            .expect("client active gauge");
+        let metrics_util::debugging::DebugValue::Gauge(value) = value else {
+            panic!("client active metric must be a gauge");
+        };
+        assert_eq!(value.into_inner(), 1.0);
+
+        // Restore the process-global active-label registry for other tests.
+        metrics::with_local_recorder(&recorder, || decrement_active(Some(&info)));
     }
 
     #[test]
