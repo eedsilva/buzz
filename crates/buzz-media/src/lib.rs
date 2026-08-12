@@ -16,8 +16,9 @@ pub mod upload_record;
 pub mod validation;
 
 pub use bucket_index::{
-    classify_key, fold_bucket_listing, BucketAggregate, BucketSnapshot, CommunityStorage, KeyClass,
-    Page, SweepError,
+    classify_key, fold_bucket_listing, is_tenant_owned_key, sweep_bucket_taxonomy, tenant_prefixes,
+    BucketAggregate, BucketSnapshot, CommunityStorage, KeyClass, Page, SweepError,
+    TaxonomySweepOutcome,
 };
 pub use config::{MediaConfig, MediaMigrationPhase, S3AddressingStyle};
 pub use error::MediaError;
@@ -26,8 +27,8 @@ pub use keys::{
     MediaKeyError, MediaReadCandidates,
 };
 pub use storage::{
-    BlobHeadMeta, BlobMeta, BlobStream, ByteStream, MediaStorage, PayloadByteRange,
-    PayloadRangeRead,
+    BlobHeadMeta, BlobMeta, BlobStream, BulkDeleteOutcome, ByteStream, MediaStorage,
+    PayloadByteRange, PayloadRangeRead,
 };
 pub use types::BlobDescriptor;
 pub use upload::{process_file_upload, process_upload, process_video_upload};
