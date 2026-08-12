@@ -147,13 +147,9 @@ type AppSidebarProps = {
   onSelectHome: () => void;
   onSelectChannel: (channelId: string) => void;
   onOpenSearchResult: (hit: SearchHit) => void;
-  /**
-   * Full channel set used for global search. Unlike `channels` (which is
-   * scoped to the viewer's joined sidebar list), this includes open channels
-   * the viewer hasn't joined, so search can surface them.
-   */
+  /** Full channel set for global search, including channels outside the joined sidebar list. */
   searchChannels: Channel[];
-  searchFocusRequest: number;
+  searchFocusRequests: readonly [global: number, channel: number];
   onSelectSettings: (section?: SettingsSection) => void;
   onSetPresenceStatus?: (status: "online" | "away" | "offline") => void;
   onSetUserStatus: (text: string, emoji: string) => void;
@@ -220,7 +216,7 @@ export function AppSidebar({
   onSelectChannel,
   onOpenSearchResult,
   searchChannels,
-  searchFocusRequest,
+  searchFocusRequests,
   onSelectSettings,
   onSetPresenceStatus,
   onSetUserStatus,
@@ -569,6 +565,9 @@ export function AppSidebar({
         <AppSidebarPinnedHeader
           channelLabels={dmChannelLabels}
           currentPubkey={currentPubkey}
+          currentChannelId={
+            selectedView === "channel" ? selectedChannelId : null
+          }
           onBrowseChannels={onBrowseChannels}
           onCreateAgent={onCreateAgent}
           onCreateChannel={handleOpenCreateChannel}
@@ -576,7 +575,8 @@ export function AppSidebar({
           onOpenSearchResult={onOpenSearchResult}
           onSelectChannel={onSelectChannel}
           searchChannels={searchChannels}
-          searchFocusRequest={searchFocusRequest}
+          searchFocusRequest={searchFocusRequests[0]}
+          scopeSearchFocusRequest={searchFocusRequests[1]}
           suggestionChannels={channels}
         />
 
