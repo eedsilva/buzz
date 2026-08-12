@@ -61,7 +61,15 @@ import type {
   RawInstallRuntimeResult,
   RuntimeFileConfigSubset,
 } from "@/shared/api/tauri";
+import {
+  ensureRelayOriginFetch,
+  resetMediaCaches,
+} from "@/shared/lib/mediaUrl";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import {
+  isValidLinkPreviewSnapshotCanonicalUrl,
+  parseLinkPreviewSnapshots,
+} from "@/shared/lib/linkPreviewSnapshot";
 
 type TestIdentity = {
   privateKey: string;
@@ -314,6 +322,8 @@ type E2eConfig = {
     applyCommunityDelayMs?: number;
     openDmDelayMs?: number;
     sendMessageDelayMs?: number;
+    /** Hold the media proxy at port 0 until the E2E release seam is invoked. */
+    mediaProxyInitiallyUnavailable?: boolean;
     /** Hold mock send live echoes until the E2E release seam is invoked. */
     deferSendMessageLiveEcho?: boolean;
     /** Close the first channel-window live REQ; its retry is accepted. */
@@ -335,6 +345,39 @@ type E2eConfig = {
     profileHasEvent?: boolean;
     profileUpdateError?: string;
     profileUpdateErrors?: string[];
+    linkPreviewMetadata?: {
+      title: string;
+      siteName: string | null;
+      description: string | null;
+      imageDataUrl: string | null;
+      imageDomain: string | null;
+      imageFetchState?: "none" | "image" | "transient_failure" | "rejected";
+      imageRetryAfterMs?: number | null;
+      faviconDataUrl?: string | null;
+    } | null;
+    linkPreviewMetadataByHref?: Record<
+      string,
+      {
+        title: string;
+        siteName: string | null;
+        description: string | null;
+        imageDataUrl: string | null;
+        imageDomain: string | null;
+        imageFetchState?: "none" | "image" | "transient_failure" | "rejected";
+        imageRetryAfterMs?: number | null;
+        faviconDataUrl?: string | null;
+      } | null
+    >;
+    linkPreviewMetadataDelayMs?: number;
+    /** Simulates native cold-cache startup work before the async response. */
+    linkPreviewMetadataStartBlockMs?: number;
+    /** Delays link-preview snapshot media uploads so specs can exercise the
+     *  composer's settle-gated disabled state before the snapshot tag is ready. */
+    linkPreviewUploadDelayMs?: number;
+    /** Substrings of `link-preview-*` upload filenames whose `upload_media_bytes`
+     *  call should reject, so specs can drive a per-media snapshot upload failure
+     *  (e.g. `["link-preview-image"]` fails only the thumbnail, favicon survives). */
+    linkPreviewUploadErrorFilenames?: string[];
     searchProfiles?: MockSearchProfileSeed[];
     updateAvailable?: boolean;
     updateChannelDelayMs?: number;
@@ -433,6 +476,8 @@ type E2eConfig = {
     // When true, `get_identity` returns `locked: true` until `import_identity` is
     // called. Drives the keyring-locked screen in tests.
     identityLocked?: boolean;
+    /** Delay (ms) applied to identity import so specs can observe pending navigation. */
+    identityImportDelayMs?: number;
     /**
      * Global agent config returned by `get_global_agent_config`. Defaults to
      * an empty config (no provider, model, or env vars) if not specified.
@@ -1062,6 +1107,8 @@ declare global {
       command: string;
       payload: unknown;
     }>;
+    /** Release a mock media proxy held at port 0 and return its ready port. */
+    __BUZZ_E2E_RELEASE_MEDIA_PROXY__?: () => number;
     /** Release mock send events that were stored but withheld from live subscribers. */
     __BUZZ_E2E_RELEASE_SEND_MESSAGE_LIVE_ECHO__?: () => number;
     __BUZZ_E2E_EMIT_MEDIA_UPLOAD_PHASE__?: (input: {
@@ -1303,6 +1350,7 @@ declare global {
     __BUZZ_E2E_MUTATE_CHANNEL__?: (opts: {
       channelId: string;
       channelType?: "stream" | "forum" | "dm";
+      description?: string;
       removeMemberPubkey?: string;
     }) => void;
     /**
@@ -1353,6 +1401,7 @@ const CHANNEL_WINDOW_AUX_DELETION_KINDS = new Set([
 // in e2e (instead of the `buzz-media://` fallback). The reaction guard
 // asserts against this exact port.
 const MOCK_MEDIA_PROXY_PORT = 54321;
+let mockMediaProxyPort = MOCK_MEDIA_PROXY_PORT;
 
 // A relay-hosted custom emoji used by the reaction guard. Its URL matches
 // `rewriteRelayUrl()`'s `/media/{64-hex}.{ext}` pattern on the relay origin, so
@@ -5667,6 +5716,19 @@ async function submitSignedEvent(
   });
 }
 
+/** Build the channel-id → last-message-at map from the returned channel list. */
+function buildLastMessages(
+  channels: Array<{ id: string; last_message_at: string | null }>,
+): Record<string, string> {
+  const map: Record<string, string> = {};
+  for (const ch of channels) {
+    if (ch.last_message_at !== null) {
+      map[ch.id] = ch.last_message_at;
+    }
+  }
+  return map;
+}
+
 async function handleGetChannels(config: E2eConfig | undefined) {
   const channelsReadDelayMs = config?.mock?.channelsReadDelayMs ?? 0;
   if (channelsReadDelayMs > 0) {
@@ -5684,7 +5746,17 @@ async function handleGetChannels(config: E2eConfig | undefined) {
 
   const identity = getIdentity(config);
   if (!identity) {
-    return listMockChannels(config);
+    // The hash is constant ("mock-hash") and channels are always returned in
+    // full — the not-modified short-circuit is intentionally never exercised
+    // here: mock channel data mutates during tests (last_message_at updates on
+    // message emission) while the hash never changes, so honoring knownHash
+    // would wrongly short-circuit after mutations.
+    const channels = listMockChannels(config);
+    return {
+      hash: "mock-hash",
+      channels,
+      last_messages: buildLastMessages(channels),
+    };
   }
 
   // Pure Nostr: query kind:39002 (membership) for our pubkey, extract channel
@@ -5730,7 +5802,7 @@ async function handleGetChannels(config: E2eConfig | undefined) {
   );
 
   // Convert kind:39000 events to the RawChannel shape the frontend expects.
-  return metaEvents
+  const channels = metaEvents
     .map((ev) => {
       const tags = (ev.tags ?? []) as string[][];
       const getTag = (name: string) =>
@@ -5773,6 +5845,12 @@ async function handleGetChannels(config: E2eConfig | undefined) {
       };
     })
     .filter((c) => c.channel_type !== "dm" || !hiddenDms.has(c.id));
+
+  return {
+    hash: "mock-hash",
+    channels,
+    last_messages: buildLastMessages(channels),
+  };
 }
 
 async function handleGetProfile(config: E2eConfig | undefined) {
@@ -8918,6 +8996,16 @@ async function resolveMockUploadDescriptorForBytes(
   args: { data: number[] | Uint8Array; filename?: string | null },
   config: E2eConfig | undefined,
 ): Promise<RawBlobDescriptor> {
+  const uploadDelayMs = config?.mock?.linkPreviewUploadDelayMs ?? 0;
+  if (args.filename?.startsWith("link-preview-")) {
+    if (uploadDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, uploadDelayMs));
+    }
+    const errorFilenames = config?.mock?.linkPreviewUploadErrorFilenames;
+    if (errorFilenames?.some((needle) => args.filename?.includes(needle))) {
+      throw new Error(`mock upload failed for ${args.filename}`);
+    }
+  }
   const configured = config?.mock?.uploadDescriptors;
   if (configured !== undefined) {
     const descriptors = await resolveMockUploadDescriptors(config);
@@ -8932,12 +9020,30 @@ async function resolveMockUploadDescriptorForBytes(
     value.toString(16).padStart(2, "0"),
   ).join("");
   const filename = args.filename ?? "upload.bin";
-  const isAgentJson = filename.toLowerCase().endsWith(".agent.json");
+  const normalizedFilename = filename.toLowerCase();
+  const isAgentJson = normalizedFilename.endsWith(".agent.json");
+  const extension = isAgentJson
+    ? "json"
+    : normalizedFilename.endsWith(".png")
+      ? "png"
+      : normalizedFilename.endsWith(".jpg") ||
+          normalizedFilename.endsWith(".jpeg")
+        ? "jpg"
+        : normalizedFilename.endsWith(".gif")
+          ? "gif"
+          : normalizedFilename.endsWith(".webp")
+            ? "webp"
+            : "bin";
+  const type = isAgentJson
+    ? "application/json"
+    : extension === "bin"
+      ? "application/octet-stream"
+      : `image/${extension === "jpg" ? "jpeg" : extension}`;
   return {
-    url: `https://mock.relay/media/${sha256}${isAgentJson ? ".json" : ".bin"}`,
+    url: `${getRelayHttpUrl(config)}/media/${sha256}.${extension}`,
     sha256,
     size: bytes.length,
-    type: isAgentJson ? "application/json" : "application/octet-stream",
+    type,
     uploaded: Math.floor(Date.now() / 1000),
     filename,
   };
@@ -8953,6 +9059,9 @@ async function handleSendChannelMessage(
     mediaTags?: string[][] | null;
     emojiTags?: string[][] | null;
     mentionTags?: string[][] | null;
+    linkPreviewTags?: string[][] | null;
+    sentFromThreadTag?: string[] | null;
+    suppressLinkPreviews?: boolean;
   },
   config: E2eConfig | undefined,
 ): Promise<RawSendChannelMessageResponse> {
@@ -8975,7 +9084,45 @@ async function handleSendChannelMessage(
   // Reference-only mentions are already part of the outbound event. Preserve
   // them in the mock event too so local echoes match the complete sent tag set.
   const mentionTags = args.mentionTags ?? [];
-  const extraTags = [...mediaTags, ...emojiTags, ...mentionTags];
+  // Sender-authored link preview snapshots are independently validated by the
+  // real command and echoed on the stored event. Preserve them in the mock so
+  // E2E recipient rendering exercises the same authored-snapshot path.
+  const linkPreviewTags = args.linkPreviewTags ?? [];
+  if (linkPreviewTags.length > 0) {
+    const suppression = linkPreviewTags.some(
+      (tag) =>
+        tag.length === 2 && tag[0] === "link-preview" && tag[1] === "none",
+    );
+    const snapshots = linkPreviewTags.filter(
+      (tag) => tag[0] === "link-preview" && tag[1] === "snapshot",
+    );
+    const validSnapshots = parseLinkPreviewSnapshots(
+      snapshots,
+      args.content,
+      new URL(getRelayHttpUrl(config)).origin,
+    );
+    if (
+      (suppression && linkPreviewTags.length !== 1) ||
+      (!suppression &&
+        (snapshots.length !== linkPreviewTags.length ||
+          validSnapshots.length !== snapshots.length ||
+          snapshots.some(
+            (tag) => !isValidLinkPreviewSnapshotCanonicalUrl(tag[3] ?? ""),
+          )))
+    ) {
+      throw new Error("invalid link-preview snapshot tag");
+    }
+  }
+  // All independently validated kinds end up on the stored event's tag set,
+  // just like the real relay.
+  const extraTags = [
+    ...mediaTags,
+    ...emojiTags,
+    ...mentionTags,
+    ...linkPreviewTags,
+    ...(args.sentFromThreadTag ? [args.sentFromThreadTag] : []),
+    ...(args.suppressLinkPreviews ? [["link-preview", "none"]] : []),
+  ];
   const identity = getIdentity(config);
   if (!identity) {
     const createdAt = Math.floor(Date.now() / 1000);
@@ -9210,12 +9357,24 @@ async function handleEditMessage(
     content: string;
     mediaTags?: string[][] | null;
     emojiTags?: string[][] | null;
+    mentionPubkeys?: string[] | null;
+    mentionTags?: string[][] | null;
+    suppressLinkPreviews?: boolean;
   },
   config: E2eConfig | undefined,
 ): Promise<void> {
   const mediaTags = args.mediaTags ?? [];
   const emojiTags = args.emojiTags ?? [];
-  const extraTags = [...mediaTags, ...emojiTags];
+  const mentionPubkeys = args.mentionPubkeys ?? [];
+  const mentionTags = args.mentionTags;
+  const extraTags = [
+    ...mediaTags,
+    ...emojiTags,
+    ...mentionPubkeys.map((pubkey) => ["p", pubkey]),
+    ...(mentionTags ?? []),
+    ...(mentionTags ? [["buzz:mention-snapshot"]] : []),
+    ...(args.suppressLinkPreviews ? [["link-preview", "none"]] : []),
+  ];
   const tags = [["h", args.channelId], ["e", args.eventId], ...extraTags];
   const content = args.content.trim();
   const identity = getIdentity(config);
@@ -10002,6 +10161,15 @@ export function maybeInstallE2eTauriMocks() {
   window.__BUZZ_E2E_COMMANDS__ = [];
   window.__BUZZ_E2E_COMMAND_PAYLOADS__ = [];
   window.__BUZZ_E2E_COMMAND_LOG__ = [];
+  mockMediaProxyPort = config.mock?.mediaProxyInitiallyUnavailable
+    ? 0
+    : MOCK_MEDIA_PROXY_PORT;
+  window.__BUZZ_E2E_RELEASE_MEDIA_PROXY__ = () => {
+    mockMediaProxyPort = MOCK_MEDIA_PROXY_PORT;
+    resetMediaCaches();
+    ensureRelayOriginFetch();
+    return mockMediaProxyPort;
+  };
   window.__BUZZ_E2E_EMIT_MOCK_HUDDLE_TTS_SPEAKER__ = (payload) =>
     emit("huddle-tts-speaker-level", payload);
   window.__BUZZ_E2E_SIGNED_EVENTS__ = [];
@@ -10131,12 +10299,16 @@ export function maybeInstallE2eTauriMocks() {
   window.__BUZZ_E2E_MUTATE_CHANNEL__ = ({
     channelId,
     channelType,
+    description,
     removeMemberPubkey,
   }) => {
     const channel = mockChannels.find((ch) => ch.id === channelId);
     if (!channel) return;
     if (channelType !== undefined) {
       channel.channel_type = channelType;
+    }
+    if (description !== undefined) {
+      channel.description = description;
     }
     if (removeMemberPubkey !== undefined) {
       channel.members = channel.members.filter(
@@ -11175,6 +11347,12 @@ export function maybeInstallE2eTauriMocks() {
         };
       }
       case "import_identity": {
+        const importDelayMs = activeConfig?.mock?.identityImportDelayMs ?? 0;
+        if (importDelayMs > 0) {
+          await new Promise((resolve) =>
+            window.setTimeout(resolve, importDelayMs),
+          );
+        }
         const request = payload as { nsec?: string; password?: string } | null;
         const input = request?.nsec ?? "";
         if (input.trim().startsWith("ncryptsec1")) {
@@ -11201,6 +11379,26 @@ export function maybeInstallE2eTauriMocks() {
         return;
       case "fetch_join_policy":
         return activeConfig?.mock?.joinPolicy ?? null;
+      case "fetch_link_preview_metadata": {
+        const startBlockMs =
+          activeConfig?.mock?.linkPreviewMetadataStartBlockMs ?? 0;
+        if (startBlockMs > 0) {
+          const stopAt = performance.now() + startBlockMs;
+          while (performance.now() < stopAt) {
+            // Deliberately block to model uncached native command startup.
+          }
+        }
+        const delayMs = activeConfig?.mock?.linkPreviewMetadataDelayMs ?? 0;
+        if (delayMs > 0) {
+          await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+        }
+        const href = (payload as { href?: string }).href;
+        const metadataByHref = activeConfig?.mock?.linkPreviewMetadataByHref;
+        if (href && metadataByHref && Object.hasOwn(metadataByHref, href)) {
+          return metadataByHref[href];
+        }
+        return activeConfig?.mock?.linkPreviewMetadata ?? null;
+      }
       case "apply_workspace": {
         const applyDelayMs = activeConfig?.mock?.applyCommunityDelayMs ?? 0;
         if (applyDelayMs > 0) {
@@ -12581,7 +12779,7 @@ export function maybeInstallE2eTauriMocks() {
         return null;
       case "edit_message":
         return handleEditMessage(
-          payload as Parameters<typeof handleEditMessage>[0],
+          (payload as { input: Parameters<typeof handleEditMessage>[0] }).input,
           activeConfig,
         );
       case "add_reaction":
@@ -12595,7 +12793,7 @@ export function maybeInstallE2eTauriMocks() {
           activeConfig,
         );
       case "get_media_proxy_port":
-        return MOCK_MEDIA_PROXY_PORT;
+        return mockMediaProxyPort;
       case "pick_and_upload_media":
         return await resolveMockUploadDescriptors(activeConfig);
       case "pick_and_upload_image":
@@ -12964,6 +13162,8 @@ export function maybeInstallE2eTauriMocks() {
       case "agent_metric_archive_default_enabled":
         return activeConfig?.mock?.agentMetricArchiveDefaultEnabled ?? true;
       case "set_prevent_sleep_active":
+        return null;
+      case "set_window_vibrancy":
         return null;
       case "plugin:window|is_fullscreen":
         return false;

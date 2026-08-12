@@ -40,6 +40,8 @@ mod mesh_live_view;
 #[cfg(feature = "mesh-llm")]
 pub(crate) mod mesh_llm;
 #[cfg(feature = "mesh-llm")]
+pub(crate) mod mesh_readiness;
+#[cfg(feature = "mesh-llm")]
 mod mesh_snapshot;
 mod messages;
 mod notifications;
