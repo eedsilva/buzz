@@ -3,7 +3,6 @@ import {
   Activity,
   ArrowUpRight,
   BadgeCheck,
-  Copy,
   Cpu,
   Ear,
   Server,
