@@ -78,9 +78,13 @@ class ChannelSectionsNotifier extends Notifier<ChannelSectionsState> {
         if (_manager != manager) return;
         manager.scheduleWorkspaceRetry();
       },
-      onProjection: (projection) {
+      stageProjection: (projection) {
+        if (_manager != manager) return null;
+        return manager.stageWorkspaceProjection(projection);
+      },
+      commitProjection: (staged) {
         if (_manager != manager) return false;
-        return manager.applyWorkspaceProjection(projection);
+        return manager.commitWorkspaceProjection(staged);
       },
     );
     manager = ChannelSectionsManager(
