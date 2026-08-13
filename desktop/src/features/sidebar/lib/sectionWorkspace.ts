@@ -44,6 +44,12 @@ const MAX_ASSIGNMENTS = 1_000;
 const MAX_ENCRYPTED_METADATA_BYTES = 65_535;
 const MAX_KEY_ENVELOPE_BYTES = 4_096;
 const CACHE_PREFIX = "buzz-section-workspace.v1";
+class UntrustedProjectionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "UntrustedProjectionError";
+  }
+}
 type ProjectionSection = {
   id: string;
   rank: number;
@@ -533,7 +539,7 @@ function writeCache(
     );
   } catch {}
 }
-function aad(
+export function canonicalMetadataAad(
   community: string,
   owner: string,
   sectionId: string,
@@ -542,7 +548,7 @@ function aad(
 ): string {
   return canonicalJson({
     version: 1,
-    community,
+    community: canonicalRelayAuthority(community),
     owner_pubkey: owner,
     section_id: sectionId,
     key_epoch: epoch,
@@ -571,13 +577,7 @@ async function encryptMetadata(
     await encryptWorkspaceMetadata({
       keyHex: key,
       plaintext: value,
-      aad: aad(
-        canonicalRelayAuthority(community),
-        owner,
-        section.id,
-        1,
-        purpose,
-      ),
+      aad: canonicalMetadataAad(community, owner, section.id, 1, purpose),
     }),
     "encrypted_metadata",
     MAX_ENCRYPTED_METADATA_BYTES,
@@ -595,13 +595,7 @@ async function decryptMetadata(
   return decryptWorkspaceMetadata({
     keyHex: key,
     envelope: value,
-    aad: aad(
-      canonicalRelayAuthority(community),
-      owner,
-      sectionId,
-      epoch,
-      purpose,
-    ),
+    aad: canonicalMetadataAad(community, owner, sectionId, epoch, purpose),
   });
 }
 async function projectionStore(
@@ -690,10 +684,10 @@ async function projectionFromEvent(
   try {
     relaySelf = await getRelaySelf();
   } catch {
-    throw new Error("relay signer is untrusted");
+    throw new UntrustedProjectionError("relay signer is untrusted");
   }
   if (!relaySelf || relaySelf !== event.pubkey)
-    throw new Error("invalid projection relay signer");
+    throw new UntrustedProjectionError("invalid projection relay signer");
   const projection = parseSectionWorkspaceProjection(
     parseStrictJson(event.content),
   );
@@ -937,8 +931,10 @@ export class SectionWorkspaceSyncManager {
           );
         }
       }
-    } catch {
-      this.workspaceProbeBlocked = true;
+    } catch (error) {
+      if (!(error instanceof UntrustedProjectionError)) {
+        this.workspaceProbeBlocked = true;
+      }
     }
     return this.cached ? this.getCachedStore() : null;
   }
@@ -974,8 +970,10 @@ export class SectionWorkspaceSyncManager {
             if (action !== "accept") return;
             const store = await this.acceptProjection(remote);
             onStore(store);
-          } catch {
-            this.workspaceProbeBlocked = true;
+          } catch (error) {
+            if (!(error instanceof UntrustedProjectionError)) {
+              this.workspaceProbeBlocked = true;
+            }
           }
         })();
       },
