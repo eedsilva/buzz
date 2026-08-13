@@ -544,6 +544,55 @@ void main() {
     expect(padding.bottom, Grid.xl + footerClearance + keyboardInset);
   });
 
+  testWidgets('lazily builds search result rows', (tester) async {
+    tester.view.physicalSize = const Size(320, 640);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final channels = [
+      for (var index = 0; index < 200; index++)
+        Channel(
+          id: 'channel-$index',
+          name: 'channel-$index',
+          channelType: 'stream',
+          visibility: 'open',
+          description: 'Channel $index',
+          createdBy: 'test',
+          createdAt: DateTime(2025),
+          memberCount: 1,
+          isMember: true,
+        ),
+    ];
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          searchProvider.overrideWith(
+            () => _FakeSearchNotifier(
+              SearchState(query: 'channel', channelResults: channels),
+            ),
+          ),
+          recentSearchesProvider.overrideWith(
+            () => _FakeRecentSearchesNotifier(const []),
+          ),
+          profileProvider.overrideWith(() => _FakeProfileNotifier()),
+        ],
+        child: const SearchPage(),
+      ),
+    );
+    await tester.pump();
+
+    expect(
+      find.byKey(const Key('search-channel-row-channel-0')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const Key('search-channel-row-channel-199')),
+      findsNothing,
+      reason: 'Offscreen results must not be eagerly mounted.',
+    );
+  });
+
   testWidgets('keeps search results scrollable above the keyboard', (
     tester,
   ) async {
@@ -588,12 +637,18 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    final results = tester.widget<ListView>(
+    final results = tester.widget<CustomScrollView>(
       find.byKey(const Key('search-results-list')),
     );
-    final padding = results.padding! as EdgeInsets;
-
-    expect(padding.bottom, Grid.xl + footerClearance + keyboardInset);
+    expect(results.slivers, isNotEmpty);
+    expect(
+      tester
+          .widget<SizedBox>(
+            find.byKey(const Key('search-results-bottom-clearance')),
+          )
+          .height,
+      Grid.xl + footerClearance + keyboardInset,
+    );
   });
 
   testWidgets('keeps no-results feedback above the keyboard', (tester) async {
