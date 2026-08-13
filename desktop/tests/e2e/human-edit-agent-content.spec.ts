@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
+import { selectMessageAction } from "../helpers/messageActions";
 
 // Fixed pubkey for the owned managed agent seeded in these tests.
 // Must not collide with any existing e2eBridge constant.
@@ -189,8 +190,7 @@ test("owner can delete their owned agent's message from the thread panel", async
   await expect(agentRow).toBeVisible({ timeout: 10_000 });
 
   // Open the thread panel by hovering the message and clicking Reply.
-  await agentRow.hover();
-  await agentRow.getByRole("button", { name: "Reply" }).click();
+  await selectMessageAction(agentRow, "Reply");
 
   // Wait for the thread panel and confirm the thread head contains the agent message.
   const threadPanel = page.getByTestId("message-thread-panel");

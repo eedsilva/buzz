@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
+import { selectMessageAction } from "../helpers/messageActions";
 
 type MockMessageWindow = Window & {
   __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
@@ -77,9 +78,10 @@ test.describe("channel shared header backdrop", () => {
       },
     );
 
-    const replyButton = page.locator('[data-testid^="reply-message-"]').first();
-    await expect(replyButton).toBeVisible();
-    await replyButton.click({ force: true });
+    const rootMessage = page
+      .getByTestId("message-row")
+      .filter({ hasText: "Root message for shared header backdrop coverage." });
+    await selectMessageAction(rootMessage, "Reply");
     await expect(page.getByTestId("message-thread-panel")).toBeVisible();
 
     const sharedBackdrop = page.getByTestId("channel-shared-header-backdrop");

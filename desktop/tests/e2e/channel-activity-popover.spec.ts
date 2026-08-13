@@ -2,6 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
+import { selectMessageQuickReaction } from "../helpers/messageActions";
 
 const SELF_PUBKEY = "deadbeef".repeat(8);
 const CHANNEL_GENERAL = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
@@ -770,13 +771,7 @@ test.describe("channel activity hover preview", () => {
       .getByTestId("message-row")
       .filter({ hasText: "Reacting here means I care" });
     await expect(rootRow).toBeVisible();
-    await rootRow.hover();
-    const actionBar = page.getByTestId(`message-action-bar-${root.id}`);
-    await expect(actionBar).toBeVisible();
-    await actionBar
-      .getByRole("button", { name: /^React with / })
-      .first()
-      .click();
+    await selectMessageQuickReaction(rootRow, /^React with /);
     await expect(
       rootRow.getByRole("button", { name: /^Toggle .* reaction$/ }),
     ).toBeVisible();

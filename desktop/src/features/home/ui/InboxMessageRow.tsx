@@ -135,6 +135,7 @@ export function InboxMessageRow({
           onReply={canReply ? () => onSelectReplyTarget(message) : undefined}
           reactionErrorMessage={reactionErrorMessage}
           reactions={reactions}
+          presentation="menu"
         />
       </div>
     ) : null;

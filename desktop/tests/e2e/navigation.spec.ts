@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
+import { selectMessageAction } from "../helpers/messageActions";
 import { openSettings } from "../helpers/settings";
 
 const ENGINEERING_CHANNEL_ID = "1c7e1c02-87bb-5e88-b2da-5a7a9432d0c9";
@@ -159,8 +160,7 @@ test("back and forward restore open thread panels", async ({ page }) => {
     .getByTestId("message-timeline")
     .getByTestId("message-row")
     .first();
-  await rootMessage.hover();
-  await rootMessage.getByRole("button", { name: "Reply" }).click();
+  await selectMessageAction(rootMessage, "Reply");
 
   const threadPanel = page.getByTestId("message-thread-panel");
   await expect(threadPanel).toBeVisible();
@@ -189,8 +189,7 @@ test("back undoes closing a thread panel", async ({ page }) => {
     .getByTestId("message-timeline")
     .getByTestId("message-row")
     .first();
-  await rootMessage.hover();
-  await rootMessage.getByRole("button", { name: "Reply" }).click();
+  await selectMessageAction(rootMessage, "Reply");
 
   const threadPanel = page.getByTestId("message-thread-panel");
   await expect(threadPanel).toBeVisible();
@@ -212,8 +211,7 @@ test("open thread panels survive reload", async ({ page }) => {
     .getByTestId("message-timeline")
     .getByTestId("message-row")
     .first();
-  await rootMessage.hover();
-  await rootMessage.getByRole("button", { name: "Reply" }).click();
+  await selectMessageAction(rootMessage, "Reply");
 
   const threadPanel = page.getByTestId("message-thread-panel");
   await expect(threadPanel).toBeVisible();
@@ -274,8 +272,7 @@ test("settings is a route: section survives reload, closing returns to the previ
     .getByTestId("message-timeline")
     .getByTestId("message-row")
     .first();
-  await rootMessage.hover();
-  await rootMessage.getByRole("button", { name: "Reply" }).click();
+  await selectMessageAction(rootMessage, "Reply");
   const threadPanel = page.getByTestId("message-thread-panel");
   await expect(threadPanel).toBeVisible();
   const channelUrl = page.url();

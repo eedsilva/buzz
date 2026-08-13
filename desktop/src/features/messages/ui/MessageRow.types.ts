@@ -11,7 +11,6 @@ export type ThreadDepthGuideAction = {
 };
 
 export type MessageRowProps = {
-  actionBarPlacement?: "floating" | "inside";
   bodyFooter?: ReactNode;
   channelId?: string | null;
   collapseDepthGuideActions?: ReadonlyArray<ThreadDepthGuideAction>;

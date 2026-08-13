@@ -583,7 +583,6 @@ export function MessageThreadPanel({
           >
             <div className="rounded-2xl">
               <MessageRow
-                actionBarPlacement="inside"
                 channelId={channelId}
                 currentPubkey={currentPubkey}
                 huddleMemberPubkeys={huddleMemberPubkeys}

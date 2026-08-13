@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
+import { selectMessageQuickReaction } from "../helpers/messageActions";
 import type { RelayEvent } from "../../src/shared/api/types";
 
 const GENERAL_CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
@@ -172,9 +173,7 @@ test("inbox reaction on a thread-reply mention persists after refetch", async ({
     ),
   ).toBeLessThanOrEqual(1);
 
-  await selectedMessage
-    .getByRole("button", { name: "React with :+1:" })
-    .click();
+  await selectMessageQuickReaction(selectedMessage, "React with :+1:");
 
   // The pill must appear AND persist: the post-toggle refetch replaces the
   // optimistic state with fetched reaction events. Give the refetch time to

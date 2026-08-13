@@ -23,6 +23,16 @@ test("quick reactions backfill defaults after stale custom emoji", () => {
   );
 });
 
+test("quick reactions fill the expanded fifth slot from recent reactions", () => {
+  assert.deepEqual(resolveQuickReactionEmojis([entry("🔥")], 5, []), [
+    "🔥",
+    "👍",
+    "❤️",
+    "😂",
+    "🎉",
+  ]);
+});
+
 test("quick reactions skip stale custom emoji before applying the limit", () => {
   assert.deepEqual(
     resolveQuickReactionEmojis(

@@ -159,7 +159,7 @@ function MoreActionsMenu({
           {quickReactionTray ? (
             <>
               <div
-                className="flex items-center justify-center gap-0.5 px-1 py-0.5"
+                className="flex w-full items-center justify-between px-1 py-0.5"
                 data-testid={`message-quick-reactions-${message.id}`}
               >
                 {quickReactionTray}
@@ -462,7 +462,7 @@ export const MessageActionBar = React.memo(function MessageActionBar({
   const [isReactionPickerOpen, setIsReactionPickerOpen] = React.useState(false);
   const [isDropdownOpen, setIsDropdownOpen] = React.useState(false);
   const customEmoji = useCustomEmoji();
-  const quickReactionEmojis = useQuickReactionEmojis(4, customEmoji);
+  const quickReactionEmojis = useQuickReactionEmojis(5, customEmoji);
   const quickReactionItems = React.useMemo(
     () =>
       quickReactionEmojis
@@ -507,6 +507,10 @@ export const MessageActionBar = React.memo(function MessageActionBar({
         onReactionBadgeBurstRequest?.(emoji);
       }
 
+      if (closeMenu) {
+        setIsDropdownOpen(false);
+      }
+
       void onReactionSelect(emoji)
         .then(() => {
           recordQuickReactionEmoji(emoji);
@@ -515,9 +519,6 @@ export const MessageActionBar = React.memo(function MessageActionBar({
         .finally(() => {
           if (closePicker) {
             setIsReactionPickerOpen(false);
-          }
-          if (closeMenu) {
-            setIsDropdownOpen(false);
           }
         });
     },
@@ -613,7 +614,7 @@ export const MessageActionBar = React.memo(function MessageActionBar({
             "flex items-center gap-0.5",
             presentation === "tray"
               ? "p-1"
-              : "gap-0 bg-background [&_button]:h-6 [&_button]:w-6",
+              : "gap-0 bg-transparent [&_button]:h-6 [&_button]:w-6",
           )}
         >
           {presentation === "menu" ? (

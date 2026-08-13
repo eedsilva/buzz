@@ -89,7 +89,6 @@ export const MessageRow = React.memo(
     huddleMemberPubkeys,
     huddleMemberPubkeysPending = false,
     hideAgentAccessBadge = false,
-    actionBarPlacement = "floating",
     collapseDescendantsLabel,
     isFollowingThread,
     isContinuation = false,
@@ -532,10 +531,8 @@ export const MessageRow = React.memo(
 
     const actionBarNode = (
       <MessageRowActions
-        actionBarPlacement={actionBarPlacement}
         anchorToBubble={anchorActionBarToBubble}
         channelId={channelId}
-        isContinuation={isContinuation}
         isFollowingThread={isFollowingThread}
         isUnread={isUnread}
         message={message}
