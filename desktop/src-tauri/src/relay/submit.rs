@@ -29,7 +29,7 @@ pub async fn submit_signed_event_at_with_keys(
     let auth_header = build_nip98_auth_header_for_keys(keys, &Method::POST, &url, &body_bytes)?;
 
     let response = state
-        .http_client
+        .relay_bridge_client
         .post(&url)
         .header("Authorization", auth_header)
         .header("Content-Type", "application/json")

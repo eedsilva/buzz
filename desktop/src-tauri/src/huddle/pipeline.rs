@@ -631,7 +631,10 @@ pub(crate) fn spawn_transcription_task(
     // Capture the current generation at spawn time.
     let spawned_gen = session_generation.load(Ordering::Acquire);
 
-    let http_client = state.http_client.clone();
+    // STT posts kind:9 transcript events to the relay bridge's `POST /events`
+    // — small JSON bodies on the same surface as thread reads, so it takes the
+    // bridge client and its stall budget rather than the streaming client.
+    let http_client = state.relay_bridge_client.clone();
     let keys = match state.keys.lock() {
         Ok(k) => k.clone(),
         Err(_) => return,

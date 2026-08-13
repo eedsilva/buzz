@@ -27,7 +27,7 @@ pub async fn relay_requires_membership(
         .unwrap_or_else(|| relay_api_base_url_with_override(&state));
     let url = format!("{}/info", base_url.trim_end_matches('/'));
     let response = state
-        .http_client
+        .relay_bridge_client
         .get(url)
         .header("Accept", "application/nostr+json")
         .send()
