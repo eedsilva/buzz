@@ -47,6 +47,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   String? _subscriptionRelayBaseUrl;
   Timer? _backstopTimer;
   Timer? _unreadCatchUpTimer;
+  int _unreadCatchUpGeneration = 0;
   final Map<String, int> _latestObservedByChannel = {};
   final Map<String, Map<String, ObservedUnreadEvent>>
   _observedUnreadEventsByChannel = {};
@@ -525,8 +526,12 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
 
     if (ref.read(relayConfigProvider).baseUrl != relayBaseUrl) return;
     final channelIds = _desiredLiveChannelIds;
+    var didEstablishSubscription = false;
     if (_subscriptionRelayBaseUrl != relayBaseUrl ||
         !_sameStringSet(_subscribedLiveChannelIds, channelIds)) {
+      _unreadCatchUpGeneration++;
+      _unreadCatchUpTimer?.cancel();
+      _unreadCatchUpTimer = null;
       _liveUnsubscribe?.call();
       _liveUnsubscribe = null;
       _subscribedLiveChannelIds = const {};
@@ -552,6 +557,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
           }
           _liveUnsubscribe = unsubscribe;
           _subscribedLiveChannelIds = Set.unmodifiable(channelIds);
+          didEstablishSubscription = true;
         } catch (error) {
           debugPrint('[ChannelsNotifier] live subscription failed: $error');
         }
@@ -563,14 +569,18 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       return;
     }
 
-    _unreadCatchUpTimer?.cancel();
-    _unreadCatchUpTimer = Timer(_unreadCatchUpDelay, () {
-      if (subscriptionVersion != _subscriptionVersion ||
-          ref.read(relaySessionProvider).status != SessionStatus.connected) {
-        return;
-      }
-      unawaited(_catchUpUnreadEvents(channels));
-    });
+    if (didEstablishSubscription) {
+      final catchUpGeneration = ++_unreadCatchUpGeneration;
+      _unreadCatchUpTimer?.cancel();
+      _unreadCatchUpTimer = Timer(_unreadCatchUpDelay, () {
+        if (catchUpGeneration != _unreadCatchUpGeneration ||
+            subscriptionVersion != _subscriptionVersion ||
+            ref.read(relaySessionProvider).status != SessionStatus.connected) {
+          return;
+        }
+        unawaited(_catchUpUnreadEvents(channels, catchUpGeneration));
+      });
+    }
 
     _backstopTimer?.cancel();
     _backstopTimer = Timer.periodic(
@@ -579,7 +589,10 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     );
   }
 
-  Future<void> _catchUpUnreadEvents(List<Channel> channels) async {
+  Future<void> _catchUpUnreadEvents(
+    List<Channel> channels,
+    int catchUpGeneration,
+  ) async {
     final myPk = ref.read(myPubkeyProvider);
     if (myPk == null) return;
 
@@ -597,7 +610,6 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     for (final channel in channels) {
       if (!channel.isMember || channel.isArchived) continue;
       final readAt = readState.effectiveTimestamp(channel.id);
-      if (readAt == null) continue;
       tasks.add(
         () => _catchUpUnreadEventsForChannel(
           session,
@@ -610,7 +622,8 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     }
 
     for (final task in tasks) {
-      if (ref.read(relaySessionProvider).status != SessionStatus.connected) {
+      if (catchUpGeneration != _unreadCatchUpGeneration ||
+          ref.read(relaySessionProvider).status != SessionStatus.connected) {
         return;
       }
       await task();
@@ -850,6 +863,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     _backstopTimer = null;
     _unreadCatchUpTimer?.cancel();
     _unreadCatchUpTimer = null;
+    _unreadCatchUpGeneration++;
   }
 }
 
