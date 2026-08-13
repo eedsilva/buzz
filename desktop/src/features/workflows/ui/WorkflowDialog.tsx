@@ -256,6 +256,7 @@ export function WorkflowDialog({
 
           <div className="min-h-0 flex-1">
             <WorkflowFormBuilder
+              channels={channels}
               disabled={mutation.isPending}
               footerLeadingContainer={footerLeadingElement}
               mode={editorMode}
@@ -291,6 +292,7 @@ export function WorkflowDialog({
                   </div>
                 ) : null
               }
+              workflowChannelId={selectedChannelId || null}
               yaml={yamlDefinition}
             />
           </div>
