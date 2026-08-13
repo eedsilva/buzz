@@ -913,7 +913,7 @@ pub(crate) async fn submit_engram_event(
     crate::relay_admission::wait_for_rate_limit().await;
     let auth = build_nip98_auth_header_for_keys(agent_keys, &Method::POST, url, event_json)?;
     let mut request = state
-        .http_client
+        .relay_bridge_client
         .post(url)
         .header("Authorization", auth)
         .header("Content-Type", "application/json");

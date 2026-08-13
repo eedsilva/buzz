@@ -23,6 +23,11 @@ pub struct AppState {
     /// recovery flags are cleared so `get_identity` reports a consistent state.
     pub(crate) identity_storage: AtomicU8,
     pub http_client: reqwest::Client,
+    /// Client for the relay's JSON bridge (`POST /query`, `POST /events`,
+    /// `GET /info`). Separate from `http_client` because it is the only
+    /// consumer whose requests are uniformly small and short-lived, and so the
+    /// only one that can carry a read timeout. See [`build_relay_bridge_client`].
+    pub relay_bridge_client: reqwest::Client,
     /// A no-redirect client for authenticated relay media fetches (download,
     /// clipboard copy, snapshot, editor). Every caller pre-validates the URL
     /// origin, but the app-wide `http_client` follows redirects by default, so
@@ -157,26 +162,10 @@ fn identity_from_env() -> Option<Keys> {
     }
 }
 
-/// Build the no-redirect HTTP client used for authenticated relay media
-/// fetches (download / copy).
-///
-/// This client is a security boundary, not a convenience: it carries a minted
-/// media `Authorization` header, so it MUST NOT follow redirects. A relay 3xx
-/// to an off-origin or private host would otherwise forward that header across
-/// origins (a redirect-hop SSRF). `redirect::Policy::none()` returns the 3xx
-/// verbatim so the caller can reject it.
-///
-/// Returned as a `Result` so the fail-closed invariant is testable — callers
-/// must never substitute a redirect-following client on build failure. Shares
-/// the localhost `resolve`/pool config with the app-wide `http_client`.
-pub fn build_media_fetch_client() -> reqwest::Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .resolve("localhost", std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
-        .pool_idle_timeout(std::time::Duration::from_secs(10))
-        .pool_max_idle_per_host(1)
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-}
+#[path = "app_state_http.rs"]
+mod http_clients;
+use http_clients::http_client_base;
+pub use http_clients::{build_media_fetch_client, build_relay_bridge_client};
 
 pub fn build_app_state() -> AppState {
     // Env var takes precedence (dev/CI). If absent, resolve_persisted_identity()
@@ -195,12 +184,14 @@ pub fn build_app_state() -> AppState {
     AppState {
         keys: Mutex::new(keys),
         identity_storage: AtomicU8::new(identity_storage as u8),
-        http_client: reqwest::Client::builder()
-            .resolve("localhost", std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
-            .pool_idle_timeout(std::time::Duration::from_secs(10))
-            .pool_max_idle_per_host(1)
+        http_client: http_client_base()
             .build()
             .unwrap_or_else(|_| reqwest::Client::new()),
+        relay_bridge_client: build_relay_bridge_client().expect(
+            "relay_bridge_client must build with its read timeout; a fallback \
+             client would silently restore the unbounded wait that leaves the \
+             thread panel pending with no data and no error",
+        ),
         media_fetch_client: build_media_fetch_client().expect(
             "media_fetch_client must build with redirect::Policy::none(); a \
              redirect-following fallback would forward the minted media auth \

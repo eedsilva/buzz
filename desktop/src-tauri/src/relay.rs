@@ -324,7 +324,7 @@ pub async fn query_relay_at(
     let auth = build_nip98_auth_header(&Method::POST, &url, &body_bytes, state)?;
 
     let response = state
-        .http_client
+        .relay_bridge_client
         .post(&url)
         .header("Authorization", auth)
         .header("Content-Type", "application/json")
@@ -353,7 +353,7 @@ pub async fn query_relay_at_with_keys(
         serde_json::to_vec(filters).map_err(|e| format!("filter serialization failed: {e}"))?;
     let auth = build_nip98_auth_header_for_keys(keys, &Method::POST, &url, &body_bytes)?;
     let mut request = state
-        .http_client
+        .relay_bridge_client
         .post(&url)
         .header("Authorization", auth)
         .header("Content-Type", "application/json");
@@ -456,7 +456,7 @@ pub async fn sync_managed_agent_profile(
     let auth = build_nip98_auth_header_for_keys(agent_keys, &Method::POST, &url, &body_bytes)?;
 
     let mut request = state
-        .http_client
+        .relay_bridge_client
         .post(&url)
         .header("Authorization", auth)
         .header("Content-Type", "application/json");
@@ -571,7 +571,7 @@ pub async fn submit_signed_event_with_keys(
     let auth_header = build_nip98_auth_header_for_keys(keys, &Method::POST, &url, &body_bytes)?;
 
     let mut request = state
-        .http_client
+        .relay_bridge_client
         .post(&url)
         .header("Authorization", auth_header)
         .header("Content-Type", "application/json");
