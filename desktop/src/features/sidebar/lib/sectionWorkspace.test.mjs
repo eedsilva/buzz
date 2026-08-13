@@ -8,6 +8,8 @@ import { finalizeEvent } from "nostr-tools/pure";
 import { relayClient } from "@/shared/api/relayClient";
 import {
   canonicalJson,
+  canonicalMetadataAad,
+  canonicalRelayAuthority,
   parseSectionWorkspaceProjection,
   parseStrictJson,
   projectionRevisionAction,
@@ -113,6 +115,38 @@ test("section workspace consumes every shared projection fixture revision case",
   }
 });
 
+test("canonical relay authority and metadata AAD match the frozen fixture", () => {
+  const aadCanonical = fixture.metadata_crypto.aad_canonical;
+  const owner = OWNER;
+  const sectionId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  assert.equal(
+    canonicalRelayAuthority("wss://Relay.Example/"),
+    "relay.example",
+  );
+  assert.equal(
+    canonicalRelayAuthority("https://RELAY.EXAMPLE"),
+    "relay.example",
+  );
+  assert.equal(
+    canonicalRelayAuthority("wss://Relay.Example:8443/"),
+    "relay.example:8443",
+  );
+  assert.equal(
+    canonicalMetadataAad("wss://Relay.Example/", owner, sectionId, 1, "label"),
+    aadCanonical,
+  );
+  assert.notEqual(
+    canonicalMetadataAad(
+      "wss://Relay.Example:8443/",
+      owner,
+      sectionId,
+      1,
+      "label",
+    ),
+    aadCanonical,
+  );
+});
+
 test("section workspace rejects unknown fields, unsupported versions, duplicate IDs, and malformed JSON", () => {
   const valid = structuredClone(fixture.projection_cases[0].projection);
   assert.throws(() =>
@@ -135,6 +169,46 @@ test("section workspace canonicalization matches the frozen legacy hash vector",
     createHash("sha256").update(canonical).digest("hex"),
     vector.sha256,
   );
+});
+
+test("valid projection is rejected for wrong, null, or failed relay self without cache or canonical cutover", async () => {
+  const storage = memoryStorage();
+  const event = makeProjectionEvent();
+  const relaySelfValues = [
+    "2222222222222222222222222222222222222222222222222222222222222222",
+    null,
+    new Error("NIP-11 unavailable"),
+  ];
+  for (const relaySelf of relaySelfValues) {
+    const restoreRelay = installRelayStubs({
+      fetchEvents: async () => [event],
+      publishEvent: async () => {},
+      subscribeLive: async () => async () => {},
+    });
+    const restoreWindow = installWindow(storage, async (command) => {
+      if (command === "get_relay_self") {
+        if (relaySelf instanceof Error) throw relaySelf;
+        return relaySelf;
+      }
+      throw new Error(`unexpected command ${command}`);
+    });
+    try {
+      const manager = new SectionWorkspaceSyncManager(OWNER, RELAY);
+      const result = await manager.bootstrap(async () => null);
+      assert.equal(result, null);
+      assert.equal(manager.isCanonical(), false);
+      assert.equal(manager.getCachedStore(), null);
+      assert.equal(
+        storage.getItem(
+          `buzz-section-workspace.v1:${OWNER}:wss%3A%2F%2Frelay.example`,
+        ),
+        null,
+      );
+    } finally {
+      restoreWindow();
+      restoreRelay();
+    }
+  }
 });
 
 test("projection is decrypted, cached by normalized relay, and rendered during outage", async () => {
@@ -272,6 +346,96 @@ test("migration stores one canonical command and replays exact bytes after a fai
     assert.equal(published.length, 2);
     assert.equal(published[1].content, firstCommand);
     assert.deepEqual(published[1].tags, firstTags);
+  } finally {
+    restoreWindow();
+    restoreRelay();
+  }
+});
+
+test("failed import persistence never publishes and restart replays only the durable command", async () => {
+  const values = new Map();
+  let failActionWrite = true;
+  const storage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => {
+      if (failActionWrite && key.includes(":import-action:")) {
+        throw new Error("quota");
+      }
+      values.set(key, String(value));
+    },
+    removeItem: (key) => values.delete(key),
+    clear: () => values.clear(),
+  };
+  const legacyStore = {
+    version: 1,
+    sections: [
+      {
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        name: "Alpha",
+        order: 0,
+      },
+    ],
+    assignments: {},
+  };
+  const legacyPlaintext = JSON.stringify(legacyStore);
+  const legacyEvent = {
+    id: "2222222222222222222222222222222222222222222222222222222222222222",
+    pubkey: OWNER,
+    created_at: 1,
+    kind: 30078,
+    content: "legacy-ciphertext",
+    tags: [["d", "channel-sections"]],
+    sig: "legacy-signature",
+  };
+  const published = [];
+  const restoreRelay = installRelayStubs({
+    fetchEvents: async () => [],
+    publishEvent: async (event) => {
+      published.push(event);
+      return event;
+    },
+    subscribeLive: async () => async () => {},
+  });
+  let signCount = 0;
+  const restoreWindow = installWindow(storage, async (command, args) => {
+    if (command === "generate_workspace_key")
+      return "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+    if (command === "encrypt_workspace_metadata")
+      return `ciphertext:${args.aad}`;
+    if (command === "nip44_encrypt_to_self") return "owner-envelope";
+    if (command === "sign_event") {
+      signCount += 1;
+      return JSON.stringify({
+        ...legacyEvent,
+        id: `event-${signCount}`,
+        kind: args.kind,
+        content: args.content,
+        tags: args.tags,
+      });
+    }
+    throw new Error(`unexpected command ${command}`);
+  });
+  try {
+    const first = new SectionWorkspaceSyncManager(OWNER, RELAY);
+    await first.bootstrap(async () => ({
+      event: legacyEvent,
+      plaintext: legacyPlaintext,
+      store: legacyStore,
+    }));
+    assert.equal(published.length, 0);
+    assert.equal(values.size, 1);
+    const durableCommand = [...values.values()][0];
+    assert.match(durableCommand, /"action_id"/);
+
+    failActionWrite = false;
+    const restarted = new SectionWorkspaceSyncManager(OWNER, RELAY);
+    await restarted.bootstrap(async () => {
+      throw new Error(
+        "restart must replay durable command without legacy fetch",
+      );
+    });
+    assert.equal(published.length, 1);
+    assert.equal(published[0].content, durableCommand);
   } finally {
     restoreWindow();
     restoreRelay();
