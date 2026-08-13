@@ -1,11 +1,14 @@
 import { Trash2 } from "lucide-react";
 
+import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { Textarea } from "@/shared/ui/textarea";
+import { ChannelCombobox } from "./ChannelCombobox";
 import { WorkflowConditionBuilder } from "./WorkflowConditionBuilder";
 import { WorkflowEmojiField } from "./WorkflowEmojiField";
+import { WorkflowTemplateTextarea } from "./WorkflowTemplateTextarea";
 import { FieldLabel, FormSelect } from "./workflowFormPrimitives";
 import { WorkflowWebhookHeadersEditor } from "./WorkflowWebhookHeadersEditor";
 import type { StepFormState, TriggerType } from "./workflowFormTypes";
@@ -49,13 +52,19 @@ function StepConfigFields({
   step,
   prefix,
   disabled,
+  channels,
+  previousSteps,
   triggerType,
+  workflowChannelId,
   onUpdate,
 }: {
   step: StepFormState;
   prefix: string;
   disabled?: boolean;
+  channels: Channel[];
+  previousSteps: StepFormState[];
   triggerType: TriggerType;
+  workflowChannelId?: string | null;
   onUpdate: (step: StepFormState) => void;
 }) {
   switch (step.action) {
@@ -80,15 +89,15 @@ function StepConfigFields({
         <div className="space-y-2">
           <div className="space-y-1.5">
             <FieldLabel htmlFor={`${prefix}-text`}>Message text</FieldLabel>
-            <Textarea
+            <WorkflowTemplateTextarea
               autoCapitalize="off"
               className="min-h-[60px] resize-y text-xs"
               disabled={disabled}
               id={`${prefix}-text`}
-              onChange={(event) =>
-                onUpdate({ ...step, text: event.target.value })
-              }
+              onValueChange={(text) => onUpdate({ ...step, text })}
               placeholder="e.g. Deployment started by {{trigger.author}}"
+              previousSteps={previousSteps}
+              triggerType={triggerType}
               value={step.text ?? ""}
             />
           </div>
@@ -96,21 +105,32 @@ function StepConfigFields({
             <FieldLabel htmlFor={`${prefix}-channel`}>
               Channel override (optional)
             </FieldLabel>
-            <Input
-              autoCapitalize="off"
+            <ChannelCombobox
+              allowEmpty
+              ariaLabel="Channel override (optional)"
+              channels={channels}
               disabled={disabled}
-              id={`${prefix}-channel`}
-              onChange={(event) =>
-                onUpdate({ ...step, channel: event.target.value })
+              emptyLabel={
+                workflowChannelId
+                  ? "Use workflow channel"
+                  : "Use trigger channel"
               }
-              placeholder="Channel UUID"
+              id={`${prefix}-channel`}
+              isChannelDisabled={(channel) =>
+                Boolean(workflowChannelId && channel.id !== workflowChannelId)
+              }
+              onChange={(channel) => onUpdate({ ...step, channel })}
               value={step.channel ?? ""}
+              variant="field"
             />
             <p className="text-xs text-muted-foreground">
-              Defaults to the trigger channel. Webhook and manual triggers
-              require a channel.
+              {workflowChannelId
+                ? "Defaults to this workflow's channel. Cross-channel posting is not permitted."
+                : "Defaults to the trigger channel. Webhook and manual triggers require a channel."}
             </p>
-            {triggerType === "webhook" && !(step.channel ?? "").trim() ? (
+            {triggerType === "webhook" &&
+            !workflowChannelId &&
+            !(step.channel ?? "").trim() ? (
               <p className="text-xs text-amber-700">
                 This step will fail for webhook-triggered runs until a channel
                 override is set.
@@ -303,22 +323,28 @@ function SectionHeading({ title }: { title: string }) {
 
 export function WorkflowStepCard({
   bare = false,
+  channels = [],
   showHeader = true,
   index,
   disabled,
   onRemove,
   onUpdate,
   step,
+  previousSteps = [],
   triggerType,
+  workflowChannelId,
 }: {
   bare?: boolean;
+  channels?: Channel[];
   showHeader?: boolean;
   index: number;
   disabled?: boolean;
   onRemove: () => void;
   onUpdate: (step: StepFormState) => void;
   step: StepFormState;
+  previousSteps?: StepFormState[];
   triggerType: TriggerType;
+  workflowChannelId?: string | null;
 }) {
   const prefix = `wf-step-${index}`;
 
@@ -350,11 +376,14 @@ export function WorkflowStepCard({
 
       <section className="space-y-4 pb-5">
         <StepConfigFields
+          channels={channels}
           disabled={disabled}
           onUpdate={onUpdate}
           prefix={prefix}
+          previousSteps={previousSteps}
           step={step}
           triggerType={triggerType}
+          workflowChannelId={workflowChannelId}
         />
       </section>
 

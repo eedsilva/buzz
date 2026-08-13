@@ -11,6 +11,7 @@ import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import * as React from "react";
 import { createPortal } from "react-dom";
 
+import type { Channel } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
 import { cn } from "@/shared/lib/cn";
 import {
@@ -106,6 +107,7 @@ function TriggerConfigFields({
 }
 
 type WorkflowFormBuilderProps = {
+  channels: Channel[];
   disabled?: boolean;
   footerLeadingContainer?: HTMLElement | null;
   mode: WorkflowEditorMode;
@@ -113,6 +115,7 @@ type WorkflowFormBuilderProps = {
   parseError: string | null;
   scopeField?: React.ReactNode;
   yaml: string;
+  workflowChannelId?: string | null;
 };
 
 export type WorkflowEditorMode = "form" | "yaml";
@@ -323,6 +326,7 @@ function WorkflowNode({
 }
 
 export function WorkflowFormBuilder({
+  channels,
   disabled,
   footerLeadingContainer,
   mode,
@@ -330,6 +334,7 @@ export function WorkflowFormBuilder({
   parseError,
   scopeField,
   yaml,
+  workflowChannelId,
 }: WorkflowFormBuilderProps) {
   // Parse once on mount instead of calling yamlToFormState three times
   const initialParseRef = React.useRef(yaml ? yamlToFormState(yaml) : null);
@@ -672,15 +677,21 @@ export function WorkflowFormBuilder({
                             ) : selectedStep ? (
                               <WorkflowStepCard
                                 bare
+                                channels={channels}
                                 disabled={disabled}
                                 index={selectedNode.index}
                                 onRemove={() => removeStep(selectedNode.index)}
                                 onUpdate={(updated) =>
                                   updateStep(selectedNode.index, updated)
                                 }
+                                previousSteps={formState.steps.slice(
+                                  0,
+                                  selectedNode.index,
+                                )}
                                 showHeader={false}
                                 step={selectedStep}
                                 triggerType={formState.trigger.on}
+                                workflowChannelId={workflowChannelId}
                               />
                             ) : null}
                           </motion.div>

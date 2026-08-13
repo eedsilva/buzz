@@ -447,6 +447,39 @@ test("scrolls the channel list with the mouse wheel", async ({ page }) => {
     .toBeGreaterThan(0);
 });
 
+test("selects a message destination from the channel lookup", async ({
+  page,
+}) => {
+  await navigateToWorkflows(page);
+
+  await page.getByRole("button", { name: "Create Workflow" }).click();
+  const dialog = page.getByRole("dialog");
+  await selectFirstChannel(dialog);
+  await dialog.getByRole("button", { name: "Add step" }).click();
+  await page.getByRole("menuitem", { name: "Send Message" }).click();
+
+  const channelOverride = dialog.getByRole("combobox", {
+    name: "Channel override (optional)",
+  });
+  await expect(channelOverride).toContainText("Use workflow channel");
+  await channelOverride.click();
+
+  const search = page.getByPlaceholder("Search channels...");
+  await search.fill("random");
+  await expect(
+    page.getByRole("button", { name: "random · stream" }),
+  ).toBeDisabled();
+
+  await search.fill("agents");
+  await page.getByRole("button", { name: "agents · stream" }).click();
+  await expect(channelOverride).toContainText("agents");
+
+  await dialog.getByRole("tab", { name: "YAML" }).click();
+  await expect(dialog.getByLabel("Workflow YAML")).toHaveValue(
+    /channel: [0-9a-f-]{36}/,
+  );
+});
+
 test("opens node configuration in a contextual inspector", async ({ page }) => {
   await navigateToWorkflows(page);
 
