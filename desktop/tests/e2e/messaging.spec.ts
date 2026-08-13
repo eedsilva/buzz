@@ -1312,7 +1312,7 @@ test("compact link preview image geometry truncates long titles to one line", as
   page,
 }) => {
   const previewUrl = "https://github.com/block/buzz/pull/3246?geometry=1";
-  await page.route("http://localhost:3000/media/*.png", (route) =>
+  await page.route("http://127.0.0.1:54321/media/**", (route) =>
     route.fulfill({
       body: LINK_PREVIEW_IMAGE,
       contentType: "image/png",
