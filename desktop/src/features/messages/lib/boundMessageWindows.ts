@@ -98,7 +98,7 @@ function foldUnits(queries: ClassifiedQuery[]): Map<string, MessageWindowUnit> {
  * queries. Channels and threads are bounded independently.
  *
  * Removal (not invalidation) is deliberate: a removed key reads back as absent,
- * so `shouldRefreshChannelWindowAfterSubscribe` re-fetches fresh on revisit.
+ * so a revisit re-fetches fresh via the unconditional post-subscribe refetch.
  * Deferred background writers (reaction/aux hydration, ancestor loads, mutation
  * success handlers) fire after their own promise settles with no pin, so each
  * commits through `updateRetainedMessageUnit`; bumping the evicted unit's
