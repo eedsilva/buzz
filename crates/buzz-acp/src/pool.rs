@@ -738,9 +738,11 @@ impl AgentPool {
                     && meta.membership_generation == Some(membership_generation)
             })
             .filter(|meta| {
-                meta.steer_tx
-                    .as_ref()
-                    .is_some_and(|tx| !tx.is_closed() && tx.capacity() > 0)
+                meta.control_tx.is_some()
+                    && meta
+                        .steer_tx
+                        .as_ref()
+                        .is_some_and(|tx| !tx.is_closed() && tx.capacity() > 0)
             })
             .map(|meta| meta.turn_id.clone())
     }
@@ -793,6 +795,11 @@ impl AgentPool {
                     && m.membership_generation == Some(membership_generation)
             })
             .ok_or(SteerError::PromptCompleted)?;
+        if meta.control_tx.is_none() {
+            return Err(SteerError::Transport(
+                "turn cancellation already committed".into(),
+            ));
+        }
         let tx = meta
             .steer_tx
             .as_ref()
@@ -1629,6 +1636,14 @@ pub async fn run_prompt_task(
         .unwrap_or_default();
     let _reaction_guard = ReactionGuard::new(ctx.rest_client.clone(), reaction_ids.clone());
 
+    // Establish the edit target as the failure-routing floor before any
+    // fallible session setup. Once the original event is resolved below this
+    // is refined to its visible thread, but session/new and initial-message
+    // failures must never fall back to the invisible edit event or channel root.
+    if let Some(ref mut batch) = batch {
+        initialize_edit_failure_routing(batch);
+    }
+
     //
     // Core memory is delivered inside the system prompt the harness already
     // builds (system role for protocol >= 2, the `[System]` user-message
@@ -2096,18 +2111,10 @@ pub async fn run_prompt_task(
             Some(event) => resolve_edit_routing(&event.event, &ctx.rest_client).await,
             None => None,
         };
-        b.failure_thread_tags = b.events.last().and_then(|event| {
-            crate::queue::edit_target_id(&event.event).map(|target_event_id| {
-                resolved_edit
-                    .as_ref()
-                    .map(crate::queue::ResolvedEdit::reply_thread_tags)
-                    .unwrap_or_else(|| crate::queue::ThreadTags {
-                        root_event_id: Some(target_event_id.clone()),
-                        parent_event_id: Some(target_event_id),
-                        mentioned_pubkeys: Vec::new(),
-                    })
-            })
-        });
+        b.failure_thread_tags = resolved_edit
+            .as_ref()
+            .map(crate::queue::ResolvedEdit::reply_thread_tags)
+            .or_else(|| b.failure_thread_tags.clone());
 
         let conversation_context = if ctx.context_message_limit > 0 {
             match resolved_edit
@@ -3014,6 +3021,18 @@ fn conversation_context_delta(
             })
         }
     }
+}
+
+/// Establish failure routing for an edit batch without network access.
+/// Resolution may later refine this target fallback to the original thread.
+fn initialize_edit_failure_routing(batch: &mut FlushBatch) {
+    batch.failure_thread_tags = batch.events.last().and_then(|event| {
+        crate::queue::edit_target_id(&event.event).map(|target_event_id| crate::queue::ThreadTags {
+            root_event_id: Some(target_event_id.clone()),
+            parent_event_id: Some(target_event_id),
+            mentioned_pubkeys: Vec::new(),
+        })
+    });
 }
 
 /// Resolve a kind:40003 edit through its original event for reply routing.
@@ -4563,6 +4582,7 @@ mod tests {
         let mut pool = AgentPool::from_slots(vec![None]);
         let task_id = pool.join_set.spawn(async {}).id();
         let (steer_tx, mut steer_rx) = tokio::sync::mpsc::channel(1);
+        let (control_tx, _control_rx) = tokio::sync::oneshot::channel();
         pool.task_map_mut().insert(
             task_id,
             TaskMeta {
@@ -4571,7 +4591,7 @@ mod tests {
                 membership_generation: Some(old_generation),
                 turn_id: "pre-removal-turn".into(),
                 recoverable_batch: None,
-                control_tx: None,
+                control_tx: Some(control_tx),
                 steer_tx: Some(steer_tx),
                 successful_steer_deliveries: HashSet::new(),
             },
@@ -4590,6 +4610,67 @@ mod tests {
             Err(SteerError::PromptCompleted)
         ));
         assert!(steer_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn native_steer_rejects_task_after_cancellation_is_committed() {
+        let channel_id = Uuid::new_v4();
+        let generation = 2;
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        let (steer_tx, mut steer_rx) = tokio::sync::mpsc::channel(1);
+        pool.task_map_mut().insert(
+            task_id,
+            TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                membership_generation: Some(generation),
+                turn_id: "cancelling-turn".into(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: Some(steer_tx),
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+
+        assert!(!pool.native_steer_available(channel_id, generation));
+        let (ack_tx, _ack_rx) = tokio::sync::oneshot::channel();
+        let request = SteerRequest {
+            prompt_blocks: vec!["late edit".into()],
+            ack_tx,
+        };
+        assert!(matches!(
+            pool.send_steer(channel_id, generation, request),
+            Err(SteerError::Transport(message)) if message.contains("cancellation")
+        ));
+        assert!(steer_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn edit_failure_routing_is_initialized_before_resolution() {
+        let target = "ab".repeat(32);
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(40003), "edited mention")
+            .tags([Tag::parse(["e", target.as_str()]).unwrap()])
+            .sign_with_keys(&keys)
+            .unwrap();
+        let mut batch = FlushBatch {
+            channel_id: Uuid::new_v4(),
+            events: vec![crate::queue::BatchEvent {
+                event,
+                prompt_tag: "@mention".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+            failure_thread_tags: None,
+        };
+
+        initialize_edit_failure_routing(&mut batch);
+
+        let routing = batch.failure_thread_tags.expect("edit target fallback");
+        assert_eq!(routing.root_event_id.as_deref(), Some(target.as_str()));
+        assert_eq!(routing.parent_event_id.as_deref(), Some(target.as_str()));
     }
 
     #[test]
