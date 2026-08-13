@@ -1322,6 +1322,11 @@ pub async fn claim_pending_outbox_batch(
         WHERE state = 'pending'
           AND (lease_expires_at IS NULL OR lease_expires_at < now())
           AND (retry_after IS NULL OR retry_after <= now())
+        -- NULLS FIRST is carried by this ORDER BY, not by the supporting index
+        -- (idx_relay_admin_outbox_pending is plain ascending so the desired-state
+        -- schema can match it via pgschema). Never-retried rows (retry_after IS
+        -- NULL) are claimed before rescheduled ones; Postgres applies this
+        -- ordering to the small pending candidate set regardless of index shape.
         ORDER BY retry_after NULLS FIRST, created_at ASC
         LIMIT $1
         FOR UPDATE SKIP LOCKED

@@ -159,6 +159,42 @@ mod tests {
 
     const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
 
+    /// Connection parameters parsed out of a `postgres://user:pass@host:port/db`
+    /// URL so the parity test can pass them to the `bin/pgschema` binary, which
+    /// takes discrete `--host/--port/--user/--password/--db` flags rather than a
+    /// URL. Only the shapes this test emits (`BUZZ_TEST_DATABASE_URL` /
+    /// `DATABASE_URL` / `TEST_DB_URL`) are supported.
+    struct PgConn {
+        host: String,
+        port: u16,
+        user: String,
+        password: String,
+    }
+
+    fn parse_pg_url(url: &str) -> PgConn {
+        let opts: sqlx::postgres::PgConnectOptions =
+            url.parse().expect("parse postgres connection url");
+        PgConn {
+            host: opts.get_host().to_owned(),
+            port: opts.get_port(),
+            user: opts.get_username().to_owned(),
+            password: parse_pg_password(url),
+        }
+    }
+
+    /// `PgConnectOptions` intentionally does not expose the password via a
+    /// getter, so read it straight out of the URL authority. Falls back to the
+    /// `PGPASSWORD` env var, then empty.
+    fn parse_pg_password(url: &str) -> String {
+        url.split_once("://")
+            .and_then(|(_, rest)| rest.split_once('@'))
+            .map(|(authority, _)| authority)
+            .and_then(|authority| authority.split_once(':'))
+            .map(|(_, pass)| pass.to_owned())
+            .or_else(|| std::env::var("PGPASSWORD").ok())
+            .unwrap_or_default()
+    }
+
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum ConstraintKind {
         ForeignKey,
@@ -1839,12 +1875,23 @@ mod tests {
     /// match — nothing enforces that automatically, and the lease/claim-token
     /// migrations (0034/0035) once drifted for exactly this reason.
     ///
-    /// This bootstraps one probe database from `schema.sql` and migrates
-    /// another through 1–35, then asserts the two admin tables have identical
-    /// column definitions (name, type, nullability, default) and identical
-    /// catalog-normalized index definitions. Columns are keyed by name, not
-    /// ordinal, because migrations append via `ALTER TABLE` while `schema.sql`
-    /// declares them inline — positions legitimately differ, shapes must not.
+    /// This bootstraps one probe database from `schema.sql` **through the real
+    /// `bin/pgschema apply` binary** — the exact path CI (`ci.yml`) and both
+    /// test-relay launchers take — and migrates another through 1–35, then
+    /// asserts the two admin tables have identical column definitions (name,
+    /// type, nullability, default) and identical index shapes, including each
+    /// key's catalog sort/null options (`pg_index.indoption`). Columns are keyed
+    /// by name, not ordinal, because migrations append via `ALTER TABLE` while
+    /// `schema.sql` declares them inline — positions legitimately differ, shapes
+    /// must not.
+    ///
+    /// Driving the real binary is load-bearing: `pgschema` 1.7.4 discards
+    /// per-key `NULLS FIRST`/`NULLS LAST` when it re-emits an index, so a naive
+    /// `sqlx::raw_sql(schema.sql)` bootstrap would preserve ordering the actual
+    /// deployment path silently drops — the same false-confidence class as the
+    /// drift this test guards against. `indoption` (not just `indexdef` text) is
+    /// asserted so a resurrected `NULLS FIRST` in a migration that `pgschema`
+    /// cannot represent is caught.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn admin_schema_parity_between_desired_state_and_migrations() {
@@ -1866,21 +1913,30 @@ mod tests {
             .expect("read column definitions")
         }
 
-        async fn indexes(pool: &PgPool, table: &str) -> Vec<(String, String)> {
+        // Index name + rendered definition + per-key sort/null options. indoption
+        // is a int2vector rendered as text (e.g. `{2,0}` = NULLS FIRST ASC on key
+        // 0, plain ASC on key 1) so ordering divergences that `indexdef` text may
+        // still show but `pgschema` cannot reproduce are compared structurally.
+        async fn index_shapes(pool: &PgPool, table: &str) -> Vec<(String, String, String)> {
             sqlx::query_as(
-                "SELECT indexname, indexdef FROM pg_indexes \
-                 WHERE schemaname = 'public' AND tablename = $1 \
-                 ORDER BY indexname",
+                "SELECT c.relname, pg_get_indexdef(i.indexrelid), i.indoption::int2[]::text \
+                 FROM pg_class c \
+                 JOIN pg_index i ON i.indexrelid = c.oid \
+                 JOIN pg_class t ON t.oid = i.indrelid \
+                 JOIN pg_namespace n ON n.oid = t.relnamespace \
+                 WHERE n.nspname = 'public' AND t.relname = $1 \
+                 ORDER BY c.relname",
             )
             .bind(table)
             .fetch_all(pool)
             .await
-            .expect("read index definitions")
+            .expect("read index shapes")
         }
 
         let base_url = std::env::var("BUZZ_TEST_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
             .unwrap_or_else(|_| TEST_DB_URL.to_owned());
+        let conn = parse_pg_url(&base_url);
         let admin = PgPool::connect(&base_url)
             .await
             .expect("connect admin database");
@@ -1897,18 +1953,53 @@ mod tests {
             .await
             .expect("create migrated probe database");
 
-        let schema_sql = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schema/schema.sql"),
-        )
-        .expect("read schema/schema.sql");
+        // Bootstrap the desired-state probe through the real pgschema binary, the
+        // same invocation the test-relay launchers use. The freshly-created probe
+        // db doubles as pgschema's plan database (--plan-*), which avoids the
+        // embedded-Postgres download and matches start-relay-for-tests.sh.
+        let pgschema = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bin/pgschema");
+        let schema_file =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schema/schema.sql");
+        let port = conn.port.to_string();
+        let apply = std::process::Command::new(&pgschema)
+            .args([
+                "apply",
+                "--auto-approve",
+                "--file",
+                schema_file.to_str().expect("schema path utf-8"),
+                "--host",
+                &conn.host,
+                "--port",
+                &port,
+                "--user",
+                &conn.user,
+                "--password",
+                &conn.password,
+                "--db",
+                &desired_db,
+                "--plan-host",
+                &conn.host,
+                "--plan-port",
+                &port,
+                "--plan-user",
+                &conn.user,
+                "--plan-password",
+                &conn.password,
+                "--plan-db",
+                &desired_db,
+            ])
+            .output()
+            .expect("run bin/pgschema apply (hermit env required)");
+        assert!(
+            apply.status.success(),
+            "pgschema apply failed: {}\n{}",
+            String::from_utf8_lossy(&apply.stdout),
+            String::from_utf8_lossy(&apply.stderr),
+        );
+
         let desired = PgPool::connect(&format!("{base_prefix}/{desired_db}"))
             .await
             .expect("connect desired-state probe database");
-        sqlx::raw_sql(AssertSqlSafe(schema_sql))
-            .execute(&desired)
-            .await
-            .expect("apply desired-state schema");
-
         let migrated = PgPool::connect(&format!("{base_prefix}/{migrated_db}"))
             .await
             .expect("connect migrated probe database");
@@ -1925,10 +2016,12 @@ mod tests {
                  from the migrations; update schema/schema.sql to match"
             );
             assert_eq!(
-                indexes(&desired, table).await,
-                indexes(&migrated, table).await,
-                "index parity mismatch for {table}: schema.sql desired state has drifted \
-                 from the migrations; update schema/schema.sql to match"
+                index_shapes(&desired, table).await,
+                index_shapes(&migrated, table).await,
+                "index-shape parity mismatch for {table}: the pgschema-bootstrapped desired \
+                 state (including per-key indoption) has drifted from the migrations. If a \
+                 migration uses a construct pgschema cannot represent (e.g. NULLS FIRST), the \
+                 migration and schema.sql must both use a representable shape."
             );
         }
 

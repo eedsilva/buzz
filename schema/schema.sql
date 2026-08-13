@@ -1776,7 +1776,7 @@ CREATE TABLE relay_admin_outbox (
 CREATE INDEX idx_relay_admin_outbox_action
     ON relay_admin_outbox (action_id);
 CREATE INDEX idx_relay_admin_outbox_pending
-    ON relay_admin_outbox (retry_after NULLS FIRST, created_at)
+    ON relay_admin_outbox (retry_after, created_at)
     WHERE state = 'pending';
 
 INSERT INTO _operator_global_tables (table_name, reason) VALUES
