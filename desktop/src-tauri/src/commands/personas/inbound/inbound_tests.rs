@@ -5,7 +5,7 @@ use super::*;
 use nostr::{JsonUtil, ToBech32};
 use std::collections::BTreeMap;
 
-const UUID: &str = "11111111-2222-3333-4444-555555555555";
+const UUID: &str = "11111111-2222-3333-4444-555555555555"; // sadscan:disable sq.pii.cc.visa -- fixed test UUID
 
 /// A local in-app persona: `source_team_persona_slug` is None, so its d-tag
 /// IS its UUID id. Carries env_vars + source_team that must survive a patch.
@@ -901,4 +901,64 @@ fn sami_fix_overlay_rehydrates_from_retention_after_restart() {
             .is_empty(),
         "control: hydration is owner-scoped"
     );
+}
+
+#[test]
+fn inbound_persona_rejects_invisible_definition_text() {
+    let mut inbound = inbound_for("unsafe", "Remote");
+    inbound.system_prompt = "Review\u{200B} code.".to_string();
+
+    let error = validate_inbound_persona_definition(&inbound)
+        .expect_err("relay sync must reject invisible instructions");
+
+    assert!(error.contains("U+200B"));
+}
+
+fn inbound_managed_agent_content(
+    name: &str,
+    persona_id: Option<&str>,
+    system_prompt: Option<&str>,
+) -> crate::managed_agents::agent_events::ManagedAgentEventContent {
+    crate::managed_agents::agent_events::ManagedAgentEventContent {
+        name: name.to_string(),
+        persona_id: persona_id.map(str::to_string),
+        system_prompt: system_prompt.map(str::to_string),
+        model: None,
+        provider: None,
+        persona_source_version: None,
+        parallelism: 1,
+        respond_to: crate::managed_agents::RespondTo::OwnerOnly,
+        respond_to_allowlist: vec![],
+    }
+}
+
+#[test]
+fn inbound_definition_less_agent_rejects_invisible_prompt() {
+    let inbound = inbound_managed_agent_content("Remote Agent", None, Some("Review\u{200B} code."));
+
+    let error = validate_inbound_managed_agent_definition(&inbound)
+        .expect_err("definition-less sync must reject invisible instructions");
+
+    assert!(error.contains("U+200B"));
+}
+
+#[test]
+fn inbound_managed_agent_rejects_bidirectional_name() {
+    let inbound = inbound_managed_agent_content("Remote\u{202E} Agent", None, None);
+
+    let error = validate_inbound_managed_agent_definition(&inbound)
+        .expect_err("managed-agent sync must reject bidirectional names");
+
+    assert!(error.contains("U+202E"));
+}
+
+#[test]
+fn inbound_definition_less_agent_accepts_visible_multiline_prompt() {
+    let inbound = inbound_managed_agent_content(
+        "Remote Agent",
+        None,
+        Some("Review code.\n\tCall out security risks."),
+    );
+
+    assert!(validate_inbound_managed_agent_definition(&inbound).is_ok());
 }
