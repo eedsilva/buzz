@@ -548,6 +548,51 @@ void main() {
     },
   );
 
+  test('unchanged refresh does not restart unread catch-up', () async {
+    final session = _FakeRelaySession(
+      memberships: [_membership(_channelA, myPk)],
+      metadata: [_meta(id: _channelA, name: 'general')],
+    );
+    final container = _buildContainer(session: session);
+    addTearDown(container.dispose);
+
+    await container.read(channelsProvider.future);
+    await Future<void>.delayed(const Duration(milliseconds: 2100));
+    expect(session.unreadCatchUpQueryCount, 1);
+
+    await container.read(channelsProvider.notifier).refresh();
+    await Future<void>.delayed(const Duration(milliseconds: 2100));
+
+    expect(session.unreadCatchUpQueryCount, 1);
+  });
+
+  test('changed channel set starts one replacement unread catch-up', () async {
+    final session = _FakeRelaySession(
+      memberships: [_membership(_channelA, myPk)],
+      metadata: [_meta(id: _channelA, name: 'general')],
+    );
+    final container = _buildContainer(session: session);
+    addTearDown(container.dispose);
+
+    await container.read(channelsProvider.future);
+    await Future<void>.delayed(const Duration(milliseconds: 2100));
+    expect(session.unreadCatchUpQueryCount, 1);
+    session.memberships = [
+      _membership(_channelA, myPk),
+      _membership(_channelB, myPk),
+    ];
+    session.metadata = [
+      _meta(id: _channelA, name: 'general'),
+      _meta(id: _channelB, name: 'random'),
+    ];
+
+    await container.read(channelsProvider.notifier).refresh();
+    await Future<void>.delayed(const Duration(milliseconds: 2400));
+
+    expect(session.unreadCatchUpQueryCount, 3);
+    expect(session.totalSubscribeCount, 2);
+  });
+
   test('initial fetch issues membership + metadata queries', () async {
     final session = _FakeRelaySession(
       memberships: [_membership(_channelA, myPk)],
@@ -677,6 +722,15 @@ class _FakeRelaySession extends RelaySessionNotifier {
   int unsubscribeCount = 0;
   int totalSubscribeCount = 0;
 
+  int get unreadCatchUpQueryCount => historyFilters
+      .where(
+        (filter) =>
+            filter.tags['#h']?.length == 1 &&
+            filter.kinds.length == EventKind.channelMessageEventKinds.length &&
+            filter.kinds.every(EventKind.channelMessageEventKinds.contains),
+      )
+      .length;
+
   Set<String> get activeChannels => {
     for (final (filter, _) in _subscriptions.values) ...?filter.tags['#h'],
   };
@@ -744,11 +798,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
     List<NostrFilter> filters, {
     Duration timeout = const Duration(seconds: 8),
   }) async {
-    final events = <NostrEvent>[];
-    for (final filter in filters) {
-      events.addAll(await fetchHistory(filter, timeout: timeout));
-    }
-    return events;
+    return const [];
   }
 
   @override
