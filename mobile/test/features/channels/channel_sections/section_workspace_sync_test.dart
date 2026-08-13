@@ -2,9 +2,25 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:buzz/features/channels/channel_sections/channel_sections_manager.dart';
+import 'package:buzz/features/channels/channel_sections/channel_sections_storage.dart';
 import 'package:buzz/features/channels/channel_sections/section_workspace_sync.dart';
+import 'package:buzz/shared/relay/relay.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences/shared_preferences.dart';
+
+class _WorkspaceHistoryRelaySession extends RelaySessionNotifier {
+  _WorkspaceHistoryRelaySession(this.events);
+
+  final List<NostrEvent> events;
+
+  @override
+  Future<List<NostrEvent>> fetchHistory(
+    NostrFilter filter, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async => events;
+}
 
 void main() {
   const owner =
@@ -250,6 +266,36 @@ void main() {
     },
   );
 
+  test('legacy parser rejects unknown, version, and malformed documents', () {
+    final valid = {
+      'version': 1,
+      'sections': [
+        {'id': sectionA, 'name': 'Alpha', 'icon': null, 'order': 0},
+      ],
+      'assignments': {channel: sectionA},
+    };
+    expect(parseSectionWorkspaceLegacy(valid), isNotNull);
+
+    expect(parseSectionWorkspaceLegacy({...valid, 'extra': true}), isNull);
+    expect(parseSectionWorkspaceLegacy({...valid, 'version': 2}), isNull);
+    expect(
+      parseSectionWorkspaceLegacy({
+        ...valid,
+        'sections': [
+          {'id': sectionA, 'name': 'Alpha', 'icon': null, 'order': 1},
+        ],
+      }),
+      isNull,
+    );
+    expect(
+      parseSectionWorkspaceLegacy({
+        ...valid,
+        'assignments': {channel: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'},
+      }),
+      isNull,
+    );
+  });
+
   test('canonicalization matches the shared legacy plaintext vector', () {
     final input = {
       'version': 1,
@@ -310,6 +356,120 @@ void main() {
       throwsA(anything),
     );
   });
+
+  test(
+    'cache write failure leaves staged projection and legacy state untouched',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final ownerKeys = nostr.Keys.generate();
+      final relayKeys = nostr.Keys.generate();
+      final sectionId = sectionA;
+      final oldStore = {
+        'version': 1,
+        'sections': [
+          {'id': sectionId, 'name': 'Legacy', 'order': 0},
+        ],
+        'assignments': <String, String>{},
+      };
+      await prefs.setString(
+        channelSectionsKey(ownerKeys.public),
+        jsonEncode(oldStore),
+      );
+      final workspaceKey = Uint8List.fromList(
+        List<int>.generate(32, (index) => index),
+      );
+      final envelope = SectionWorkspaceKeyEnvelopeCrypto(
+        nsec: ownerKeys.nsec,
+        ownerPubkey: ownerKeys.public,
+      ).wrap(workspaceKey);
+      final metadata = SectionWorkspaceMetadataCrypto(workspaceKey);
+      final projectionValue = {
+        'version': 1,
+        'owner_pubkey': ownerKeys.public,
+        'revision': 1,
+        'layout_revision': 1,
+        'key_epoch': 1,
+        'migration': {
+          'source_event_id': sourceEvent,
+          'source_hash': sourceHash,
+        },
+        'reader_key_envelope': envelope,
+        'sections': [
+          {
+            'id': sectionId,
+            'rank': 0,
+            'encrypted_label': metadata.encrypt(
+              plaintext: 'Projected',
+              community: 'relay.example',
+              ownerPubkey: ownerKeys.public,
+              sectionId: sectionId,
+              keyEpoch: 1,
+              purpose: 'label',
+            ),
+            'encrypted_icon': null,
+          },
+        ],
+        'assignments': [],
+      };
+      final relayEvent = nostr.Event.from(
+        kind: sectionWorkspaceProjectionKind,
+        content: jsonEncode(projectionValue),
+        tags: [
+          ['d', ownerKeys.public],
+          ['p', ownerKeys.public],
+        ],
+        secretKey: relayKeys.secret,
+        createdAt: 1700000000,
+      );
+      final relaySession = _WorkspaceHistoryRelaySession([
+        NostrEvent.fromJson(relayEvent.toMap()),
+      ]);
+      var renders = 0;
+      late final ChannelSectionsManager manager;
+      final sync = SectionWorkspaceSyncManager(
+        ownerPubkey: ownerKeys.public,
+        nsec: ownerKeys.nsec,
+        prefs: prefs,
+        relaySession: relaySession,
+        signedEventRelay: null,
+        relaySelfProvider: () async => relayKeys.public,
+        relayAuthority: 'wss://relay.example',
+        stageProjection: (projection) =>
+            manager.stageWorkspaceProjection(projection),
+        commitProjection: (staged) {
+          renders++;
+          return manager.commitWorkspaceProjection(staged);
+        },
+        cacheWriter: (_, _, _, _) async => false,
+      );
+      manager = ChannelSectionsManager(
+        pubkey: ownerKeys.public,
+        prefs: prefs,
+        crypto: ChannelSectionsCrypto(ownerKeys.nsec, ownerKeys.public),
+        relaySession: null,
+        signedEventRelay: null,
+        remoteEnabled: false,
+        workspaceSync: sync,
+        onChanged: () => renders++,
+      );
+
+      expect(await sync.probe(), isFalse);
+      expect(manager.store.sections.single.name, 'Legacy');
+      expect(renders, 0);
+      expect(sync.cache, isNull);
+      expect(
+        prefs.getString(
+          channelSectionsKey(
+            ownerKeys.public,
+            relayAuthority: sync.relayStorageScope,
+          ),
+        ),
+        jsonEncode(oldStore),
+      );
+      manager.dispose(flushPending: false);
+    },
+  );
 
   test('cache persists the last verified projection and key epoch', () async {
     SharedPreferences.setMockInitialValues({});

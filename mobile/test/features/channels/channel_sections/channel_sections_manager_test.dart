@@ -23,25 +23,23 @@ void main() {
     required List<Map<String, dynamic>> sections,
     Map<String, String> assignments = const {},
     required int createdAt,
-    String id = 'remote-event',
   }) {
     final payload = jsonEncode({
       'version': 1,
       'sections': sections,
       'assignments': assignments,
     });
-    return NostrEvent(
-      id: id,
-      pubkey: keychain.public,
-      createdAt: createdAt,
+    final event = nostr.Event.from(
       kind: EventKind.readState,
+      content: crypto.encrypt(payload),
       tags: const [
         ['d', 'channel-sections'],
         ['t', 'channel-sections'],
       ],
-      content: crypto.encrypt(payload),
-      sig: 'sig',
+      secretKey: keychain.secret,
+      createdAt: createdAt,
     );
+    return NostrEvent.fromJson(event.toMap());
   }
 
   ChannelSectionsManager buildManager({
@@ -60,6 +58,47 @@ void main() {
     );
   }
 
+  test('rejects forged legacy event identity before merge', () async {
+    await setUpEnv();
+    final valid = sectionsEvent(
+      sections: [
+        {
+          'id': 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+          'name': 'Desktop Group',
+          'order': 0,
+        },
+      ],
+      createdAt: 100,
+    );
+    final forged = NostrEvent(
+      id: 'f' * 64,
+      pubkey: valid.pubkey,
+      createdAt: valid.createdAt,
+      kind: valid.kind,
+      tags: valid.tags,
+      content: valid.content,
+      sig: valid.sig,
+    );
+    final forgedSignature = NostrEvent(
+      id: valid.id,
+      pubkey: valid.pubkey,
+      createdAt: valid.createdAt,
+      kind: valid.kind,
+      tags: valid.tags,
+      content: valid.content,
+      sig: '0' * 128,
+    );
+    final relay = _RateLimitedRelaySession(
+      failuresBeforeSuccess: 0,
+      historyEvents: [forged, forgedSignature],
+    );
+    final manager = buildManager(relaySession: relay);
+    await manager.initialize();
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    expect(manager.store.sections, isEmpty);
+    manager.dispose(flushPending: false);
+  });
+
   test('startup fetch rejected by relay rate limit retries until the remote '
       'blob is adopted (cold-start regression)', () async {
     await setUpEnv();
@@ -72,7 +111,11 @@ void main() {
       historyEvents: [
         sectionsEvent(
           sections: [
-            {'id': 's1', 'name': 'Desktop Group', 'order': 0},
+            {
+              'id': 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+              'name': 'Desktop Group',
+              'order': 0,
+            },
           ],
           createdAt: 100,
         ),
@@ -112,7 +155,11 @@ void main() {
         historyEvents: [
           sectionsEvent(
             sections: [
-              {'id': 's1', 'name': 'Desktop Group', 'order': 0},
+              {
+                'id': 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+                'name': 'Desktop Group',
+                'order': 0,
+              },
             ],
             createdAt: 100,
           ),
@@ -172,7 +219,11 @@ void main() {
     relay.emit(
       sectionsEvent(
         sections: [
-          {'id': 's1', 'name': 'Desktop Group', 'order': 0},
+          {
+            'id': 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+            'name': 'Desktop Group',
+            'order': 0,
+          },
         ],
         createdAt: 100,
       ),

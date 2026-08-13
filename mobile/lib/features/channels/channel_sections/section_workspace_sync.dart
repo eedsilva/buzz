@@ -29,6 +29,35 @@ final _sectionWorkspaceUuid = RegExp(
   r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
 );
 final _sectionWorkspaceHex64 = RegExp(r'^[0-9a-f]{64}$');
+bool verifySectionWorkspaceNostrEvent(NostrEvent event) {
+  try {
+    final verifiedEvent = nostr.Event.fromJson(jsonEncode(event.toJson()));
+    return verifiedEvent.id == event.id &&
+        verifiedEvent.pubkey == event.pubkey &&
+        verifiedEvent.createdAt == event.createdAt &&
+        verifiedEvent.kind == event.kind &&
+        verifiedEvent.tags.length == event.tags.length &&
+        _sameSectionWorkspaceTags(verifiedEvent.tags, event.tags) &&
+        verifiedEvent.content == event.content &&
+        verifiedEvent.sig == event.sig;
+  } catch (_) {
+    return false;
+  }
+}
+
+bool _sameSectionWorkspaceTags(
+  List<List<String>> left,
+  List<List<String>> right,
+) {
+  if (left.length != right.length) return false;
+  for (var index = 0; index < left.length; index++) {
+    if (left[index].length != right[index].length) return false;
+    for (var tagIndex = 0; tagIndex < left[index].length; tagIndex++) {
+      if (left[index][tagIndex] != right[index][tagIndex]) return false;
+    }
+  }
+  return true;
+}
 
 bool _validSectionWorkspaceUuid(Object? value) =>
     value is String &&
@@ -497,6 +526,100 @@ SectionWorkspaceProjection? parseSectionWorkspaceProjectionJson(String json) {
   }
 }
 
+class SectionWorkspaceLegacyParseResult {
+  final Map<String, dynamic> value;
+  final ChannelSectionStore store;
+
+  const SectionWorkspaceLegacyParseResult({
+    required this.value,
+    required this.store,
+  });
+}
+
+SectionWorkspaceLegacyParseResult? parseSectionWorkspaceLegacy(Object? value) {
+  if (value is! Map<String, dynamic> ||
+      !_exactKeys(value, const ['version', 'sections', 'assignments'])) {
+    return null;
+  }
+  final version = value['version'];
+  final rawSections = value['sections'];
+  final rawAssignments = value['assignments'];
+  if (version is! int ||
+      version != 1 ||
+      rawSections is! List ||
+      rawSections.length > sectionWorkspaceMaxSections ||
+      rawAssignments is! Map<String, dynamic> ||
+      rawAssignments.length > sectionWorkspaceMaxAssignments) {
+    return null;
+  }
+
+  final ids = <String>{};
+  final orders = <int>{};
+  final sections = <ChannelSection>[];
+  for (final raw in rawSections) {
+    if (raw is! Map<String, dynamic> ||
+        raw.keys.any(
+          (key) => !const {'id', 'name', 'icon', 'order'}.contains(key),
+        ) ||
+        raw.length < 3) {
+      return null;
+    }
+    final id = raw['id'];
+    final name = raw['name'];
+    final icon = raw['icon'];
+    final order = raw['order'];
+    if (id is! String ||
+        !_validSectionWorkspaceUuid(id) ||
+        !ids.add(id) ||
+        name is! String ||
+        name.isEmpty ||
+        utf8.encode(name).length > sectionWorkspaceMaxEncryptedMetadataBytes ||
+        (icon != null && icon is! String) ||
+        (icon is String &&
+            utf8.encode(icon).length >
+                sectionWorkspaceMaxEncryptedMetadataBytes) ||
+        order is! int ||
+        order < 0 ||
+        order >= rawSections.length ||
+        !orders.add(order)) {
+      return null;
+    }
+    sections.add(
+      ChannelSection(id: id, name: name, icon: icon as String?, order: order),
+    );
+  }
+  if (!List.generate(
+    sections.length,
+    (index) => index,
+  ).every(orders.contains)) {
+    return null;
+  }
+
+  final assignments = <String, String>{};
+  for (final entry in rawAssignments.entries) {
+    final channelId = entry.key;
+    final sectionId = entry.value;
+    if (!_validSectionWorkspaceUuid(channelId) ||
+        sectionId is! String ||
+        !_validSectionWorkspaceUuid(sectionId) ||
+        !ids.contains(sectionId)) {
+      return null;
+    }
+    assignments[channelId] = sectionId;
+  }
+  return SectionWorkspaceLegacyParseResult(
+    value: value,
+    store: ChannelSectionStore(sections: sections, assignments: assignments),
+  );
+}
+
+SectionWorkspaceLegacyParseResult? parseSectionWorkspaceLegacyJson(
+  String json,
+) {
+  final value = parseSectionWorkspaceJson(json);
+  return parseSectionWorkspaceLegacy(value);
+}
+
 String sectionWorkspaceCanonicalJson(Object? value) {
   final out = StringBuffer();
   void write(Object? current) {
@@ -797,9 +920,18 @@ class SectionWorkspaceSyncManager {
   final RelaySessionNotifier? relaySession;
   final SignedEventRelay? signedEventRelay;
   final Future<String?> Function()? relaySelfProvider;
+  final Future<bool> Function(
+    SharedPreferences prefs,
+    String ownerPubkey,
+    String relayUrl,
+    SectionWorkspaceCache cache,
+  )?
+  cacheWriter;
   final String relayUrl;
   final String relayAuthority;
-  final bool Function(SectionWorkspaceProjection projection)? onProjection;
+  final ChannelSectionStore? Function(SectionWorkspaceProjection projection)?
+  stageProjection;
+  final bool Function(ChannelSectionStore staged)? commitProjection;
   final void Function()? onWorkspaceDiscovered;
   final void Function()? onSubscriptionLost;
 
@@ -826,9 +958,11 @@ class SectionWorkspaceSyncManager {
     required this.relaySession,
     required this.signedEventRelay,
     this.relaySelfProvider,
+    this.cacheWriter,
     required String relayAuthority,
     this.nsec,
-    this.onProjection,
+    this.stageProjection,
+    this.commitProjection,
     this.onWorkspaceDiscovered,
     this.onSubscriptionLost,
   }) : relayUrl = relayAuthority,
@@ -1102,8 +1236,7 @@ class SectionWorkspaceSyncManager {
       // Relay history/live delivery is transport-authenticated, but the
       // projection is cacheable data. Verify the NIP-01 event before treating
       // it as a last-verified projection.
-      final verifiedEvent = nostr.Event.fromJson(jsonEncode(event.toJson()));
-      if (verifiedEvent.id != event.id) return null;
+      if (!verifySectionWorkspaceNostrEvent(event)) return null;
       final projection = parseSectionWorkspaceProjectionJson(event.content);
       if (projection == null || projection.ownerPubkey != ownerPubkey) {
         return null;
@@ -1141,12 +1274,13 @@ class SectionWorkspaceSyncManager {
     if (_cache != null && projection.revision <= _cache!.projection.revision) {
       return false;
     }
-    if (onProjection == null || !onProjection!(projection)) return false;
+    final staged = stageProjection?.call(projection);
+    if (staged == null) return false;
     final cache = SectionWorkspaceCache(
       eventId: event.id,
       projection: projection,
     );
-    final persisted = await writeSectionWorkspaceCache(
+    final persisted = await (cacheWriter ?? writeSectionWorkspaceCache)(
       prefs,
       ownerPubkey,
       relayStorageScope,
@@ -1156,6 +1290,7 @@ class SectionWorkspaceSyncManager {
     // Only a projection whose decrypted metadata and verified cache both made
     // it to durable local storage becomes authoritative. This keeps a cache
     // write failure on the compatibility side of the cutover boundary.
+    if (commitProjection?.call(staged) != true) return false;
     _cache = cache;
     _workspaceKnown = true;
     _cacheVerified = true;
@@ -1219,6 +1354,7 @@ class SectionWorkspaceSyncManager {
         _importInFlight ||
         event.pubkey != ownerPubkey ||
         event.kind != EventKind.readState ||
+        !verifySectionWorkspaceNostrEvent(event) ||
         event.getTagValue('d') != 'channel-sections' ||
         event.tags
                 .where(
@@ -1234,7 +1370,9 @@ class SectionWorkspaceSyncManager {
     }
     _importInFlight = true;
     try {
-      final canonical = sectionWorkspaceCanonicalJson(plaintext);
+      final acceptedLegacy = parseSectionWorkspaceLegacy(plaintext);
+      if (acceptedLegacy == null) return;
+      final canonical = sectionWorkspaceCanonicalJson(acceptedLegacy.value);
       final sourceHash = sectionWorkspaceSha256Hex(canonical);
       final hasPendingImport =
           _pendingImportSourceEvent != null ||
@@ -1254,7 +1392,11 @@ class SectionWorkspaceSyncManager {
         // The complete command is the durable cutover intent. Do not persist an
         // action-only marker: without the exact encrypted bytes there is
         // nothing safe to replay after restart.
-        final body = await _buildImportBody(event, sourceHash, store);
+        final body = await _buildImportBody(
+          event,
+          sourceHash,
+          acceptedLegacy.store,
+        );
         if (body == null || _destroyed || _workspaceKnown) return;
         if (parseSectionWorkspaceImport(body) == null) return;
         final canonicalBody = sectionWorkspaceCanonicalJson(body);

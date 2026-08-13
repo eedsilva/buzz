@@ -89,8 +89,10 @@ class ChannelSectionsManager {
 
   ChannelSectionStore get store => _store;
 
-  bool applyWorkspaceProjection(SectionWorkspaceProjection projection) {
-    if (_disposed) return false;
+  ChannelSectionStore? stageWorkspaceProjection(
+    SectionWorkspaceProjection projection,
+  ) {
+    if (_disposed) return null;
     try {
       final key = SectionWorkspaceKeyEnvelopeCrypto(
         nsec: _workspaceNsec,
@@ -128,24 +130,31 @@ class ChannelSectionsManager {
           ),
         );
       }
-      // Workspace state is read-only in Stage 1. Do not overwrite the local
-      // legacy store when rendering a verified projection; it remains the
-      // rollback source used to construct an import until cutover completes.
-      _store = ChannelSectionStore(
+      return ChannelSectionStore(
         sections: sections,
         assignments: {
           for (final assignment in projection.assignments)
             assignment.channelId: assignment.sectionId,
         },
       );
-      _onChanged();
-      return true;
     } catch (error) {
       debugPrint(
         '[ChannelSectionsManager] workspace projection rejected: $error',
       );
-      return false;
+      return null;
     }
+  }
+
+  bool commitWorkspaceProjection(ChannelSectionStore staged) {
+    if (_disposed) return false;
+    _store = staged;
+    _onChanged();
+    return true;
+  }
+
+  bool applyWorkspaceProjection(SectionWorkspaceProjection projection) {
+    final staged = stageWorkspaceProjection(projection);
+    return staged != null && commitWorkspaceProjection(staged);
   }
 
   String get _workspaceNsec => _workspaceSync?.nsec ?? '';
@@ -542,13 +551,21 @@ class ChannelSectionsManager {
 
   void _mergeEvents(List<NostrEvent> events) {
     for (final event in events) {
-      if (event.pubkey != pubkey) continue;
+      if (event.pubkey != pubkey ||
+          event.kind != EventKind.readState ||
+          !verifySectionWorkspaceNostrEvent(event)) {
+        continue;
+      }
       _mergeEvent(event);
     }
   }
 
   void _mergeEvent(NostrEvent event) {
-    if (event.pubkey != pubkey || event.kind != EventKind.readState) return;
+    if (event.pubkey != pubkey ||
+        event.kind != EventKind.readState ||
+        !verifySectionWorkspaceNostrEvent(event)) {
+      return;
+    }
     final pendingSource =
         _workspaceSync?.isPendingImportSource(event.id) ?? false;
     if (_workspaceSync != null &&
@@ -580,9 +597,9 @@ class ChannelSectionsManager {
     try {
       final plaintext = _crypto.decrypt(event.content);
       final parsed = parseSectionWorkspaceJson(plaintext);
-      if (parsed is! Map<String, dynamic>) return;
-
-      final incoming = ChannelSectionStore.fromJson(parsed);
+      final legacy = parseSectionWorkspaceLegacy(parsed);
+      if (legacy == null) return;
+      final incoming = legacy.store;
 
       if (_workspaceSync != null &&
           _workspaceSync.probeCompleted &&
@@ -590,7 +607,7 @@ class ChannelSectionsManager {
         unawaited(
           _workspaceSync.tryImportLegacy(
             event: event,
-            plaintext: parsed,
+            plaintext: legacy.value,
             store: incoming,
           ),
         );
