@@ -1,14 +1,19 @@
 use super::*;
 use nostr::{EventBuilder, Kind, Tag};
 
-fn thread_page_event(kind: u32, content: &str, root: Option<&str>) -> Event {
+fn thread_page_event_at(kind: u32, content: &str, root: Option<&str>, created_at: u64) -> Event {
     let tags = root
         .map(|root| vec![Tag::parse(["e", root]).expect("valid root tag")])
         .unwrap_or_default();
     EventBuilder::new(Kind::Custom(kind as u16), content)
         .tags(tags)
+        .custom_created_at(nostr::Timestamp::from(created_at))
         .sign_with_keys(&Keys::generate())
         .expect("test event should sign")
+}
+
+fn thread_page_event(kind: u32, content: &str, root: Option<&str>) -> Event {
+    thread_page_event_at(kind, content, root, 1_700_000_000)
 }
 
 fn bounds_event(root: &str, content: &str) -> Event {
@@ -161,7 +166,8 @@ fn thread_replies_filter_carries_non_p_gated_kinds_to_clear_the_gate() {
     // and every kind MUST be non-p-gated (else the gate still fires). The
     // Playwright mock does not model p-gating, so this unit test is the
     // only guard against the client/relay auth contract drifting.
-    let filter = build_thread_replies_filter("root-hex", Some("channel-1"), 64, 200, None, None);
+    let filter =
+        build_thread_replies_filter("root-hex", Some("channel-1"), 64, 200, None, None, true);
 
     let kinds = filter
         .get("kinds")
@@ -191,8 +197,15 @@ fn thread_replies_filter_pages_with_composite_cursor() {
         created_at: 1_700_000_000,
         event_id: "abcd".to_string(),
     };
-    let filter =
-        build_thread_replies_filter("root-hex", None, 64, 200, Some("newest"), Some(&cursor));
+    let filter = build_thread_replies_filter(
+        "root-hex",
+        None,
+        64,
+        200,
+        Some("newest"),
+        Some(&cursor),
+        true,
+    );
     assert_eq!(filter["thread_order"], serde_json::json!("newest"));
     assert_eq!(filter["thread_cursor"], serde_json::json!(1_700_000_000));
     assert_eq!(filter["thread_cursor_id"], serde_json::json!("abcd"));
@@ -200,6 +213,120 @@ fn thread_replies_filter_pages_with_composite_cursor() {
         !filter.contains_key("#h"),
         "no channel_id -> no #h scope in the filter"
     );
+}
+
+#[test]
+fn legacy_thread_filter_omits_modern_extensions_but_keeps_composite_cursor() {
+    let cursor = crate::models::ThreadCursor {
+        created_at: 1_700_000_000,
+        event_id: "abcd".to_string(),
+    };
+    let filter = build_thread_replies_filter(
+        "root-hex",
+        Some("channel-1"),
+        64,
+        200,
+        None,
+        Some(&cursor),
+        false,
+    );
+
+    assert!(!filter.contains_key("thread_bounds"));
+    assert!(!filter.contains_key("thread_order"));
+    assert_eq!(filter["thread_cursor"], serde_json::json!(1_700_000_000));
+    assert_eq!(filter["thread_cursor_id"], serde_json::json!("abcd"));
+}
+
+#[test]
+fn legacy_thread_pages_converge_past_two_same_second_boundaries() {
+    let mut all_events: Vec<Event> = (0..401)
+        .map(|_| thread_page_event_at(9, "reply", Some("root"), 1_700_000_000))
+        .collect();
+    // Old relays order and keyset on (created_at ASC, event_id ASC).
+    all_events.sort_by_key(|event| (event.created_at.as_secs(), event.id.to_hex()));
+    let expected_ids: Vec<String> = all_events.iter().map(|event| event.id.to_hex()).collect();
+    let mut received_ids = Vec::new();
+    let mut cursor: Option<crate::models::ThreadCursor> = None;
+
+    loop {
+        let modern_filter = build_thread_replies_filter(
+            "root",
+            Some("channel-1"),
+            64,
+            200,
+            Some("newest"),
+            cursor.as_ref(),
+            true,
+        );
+        assert_eq!(modern_filter["thread_bounds"], serde_json::json!(true));
+        assert_eq!(modern_filter["thread_order"], serde_json::json!("newest"));
+
+        let select_old_relay_page = |request: &serde_json::Map<String, serde_json::Value>| {
+            let cursor_created_at = request
+                .get("thread_cursor")
+                .and_then(|value| value.as_i64());
+            let cursor_id = request
+                .get("thread_cursor_id")
+                .and_then(|value| value.as_str());
+            all_events
+                .iter()
+                .filter(|event| match (cursor_created_at, cursor_id) {
+                    (Some(created_at), Some(event_id)) => {
+                        (event.created_at.as_secs() as i64, event.id.to_hex())
+                            > (created_at, event_id.to_string())
+                    }
+                    _ => true,
+                })
+                .take(200)
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+
+        // An old relay ignores the modern extensions and omits the overlay.
+        let modern_response = select_old_relay_page(&modern_filter);
+        assert!(matches!(
+            thread_page::parse(modern_response, "root"),
+            Err(thread_page::ParseError::MissingBounds)
+        ));
+
+        let legacy_filter = build_thread_replies_filter(
+            "root",
+            Some("channel-1"),
+            64,
+            200,
+            None,
+            cursor.as_ref(),
+            false,
+        );
+        assert!(!legacy_filter.contains_key("thread_bounds"));
+        assert!(!legacy_filter.contains_key("thread_order"));
+        if let Some(expected_cursor) = cursor.as_ref() {
+            assert_eq!(
+                legacy_filter["thread_cursor"],
+                serde_json::json!(expected_cursor.created_at)
+            );
+            assert_eq!(
+                legacy_filter["thread_cursor_id"],
+                serde_json::json!(expected_cursor.event_id)
+            );
+        }
+
+        let page = thread_page::parse_legacy(select_old_relay_page(&legacy_filter), 200);
+        received_ids.extend(
+            page.events
+                .iter()
+                .map(|event| event["id"].as_str().expect("event id").to_string()),
+        );
+        if !page.has_more {
+            assert!(page.next_cursor.is_none());
+            break;
+        }
+        cursor = page.next_cursor;
+    }
+
+    assert_eq!(received_ids, expected_ids);
+    let unique_ids: std::collections::HashSet<_> = received_ids.iter().collect();
+    assert_eq!(unique_ids.len(), 401);
 }
 
 #[test]
@@ -243,6 +370,7 @@ fn thread_page_parser_rejects_missing_duplicate_and_wrong_root_bounds() {
     assert!(thread_page::parse(vec![reply], "root")
         .err()
         .expect("missing bounds must fail closed")
+        .to_string()
         .contains("omitted"));
 
     let terminal = r#"{"has_more":false,"next_cursor":null}"#;
@@ -255,12 +383,14 @@ fn thread_page_parser_rejects_missing_duplicate_and_wrong_root_bounds() {
     )
     .err()
     .expect("duplicate bounds must fail closed")
+    .to_string()
     .contains("multiple"));
 
     assert!(
         thread_page::parse(vec![bounds_event("other-root", terminal)], "root")
             .err()
             .expect("mismatched root must fail closed")
+            .to_string()
             .contains("does not match")
     );
 }
@@ -271,6 +401,7 @@ fn thread_page_parser_rejects_malformed_and_inconsistent_bounds() {
         thread_page::parse(vec![bounds_event("root", "not-json")], "root")
             .err()
             .expect("malformed bounds must fail closed")
+            .to_string()
             .contains("Invalid thread bounds")
     );
 
@@ -282,6 +413,7 @@ fn thread_page_parser_rejects_malformed_and_inconsistent_bounds() {
             thread_page::parse(vec![bounds_event("root", content)], "root")
                 .err()
                 .expect("cursor presence must agree with has_more")
+                .to_string()
                 .contains("disagree")
         );
     }
