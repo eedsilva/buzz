@@ -6,10 +6,8 @@ import { cn } from "@/shared/lib/cn";
 import { MessageActionBar } from "./MessageActionBar";
 
 type MessageRowActionsProps = {
-  actionBarPlacement: "floating" | "inside";
   anchorToBubble: boolean;
   channelId?: string | null;
-  isContinuation: boolean;
   isFollowingThread?: boolean;
   isUnread?: boolean;
   message: TimelineMessage;
@@ -30,10 +28,8 @@ type MessageRowActionsProps = {
 };
 
 export function MessageRowActions({
-  actionBarPlacement,
   anchorToBubble,
   channelId,
-  isContinuation,
   isFollowingThread,
   isUnread,
   message,
@@ -52,14 +48,6 @@ export function MessageRowActions({
   reactions,
   showMessageBubbles,
 }: MessageRowActionsProps) {
-  const floatingPosition = isContinuation
-    ? showMessageBubbles
-      ? "sm:-top-1 sm:-translate-y-1/2"
-      : "sm:-top-3 sm:-translate-y-1/2"
-    : showMessageBubbles
-      ? "sm:top-2 sm:-translate-y-1/2"
-      : "sm:top-0 sm:-translate-y-1/2";
-
   return (
     <div
       className={cn(
@@ -68,11 +56,7 @@ export function MessageRowActions({
           ? anchorToBubble
             ? "-right-2 -top-2"
             : "right-1 top-1"
-          : "right-2 top-1 sm:pointer-events-none",
-        !showMessageBubbles &&
-          (actionBarPlacement === "floating"
-            ? floatingPosition
-            : "sm:top-1 sm:translate-y-0"),
+          : "right-1 top-1",
       )}
     >
       <MessageActionBar
@@ -91,7 +75,7 @@ export function MessageRowActions({
         onReply={onReply}
         onSendToChannel={onSendToChannel}
         onUnfollowThread={onUnfollowThread}
-        presentation={showMessageBubbles ? "menu" : "tray"}
+        presentation="menu"
         reactionErrorMessage={reactionErrorMessage}
         reactions={reactions}
       />

@@ -120,6 +120,66 @@ test("profile hover uses the channel hover surface", async ({ page }) => {
     .screenshot({ path: `${SHOTS}/profile-hover.png` });
 });
 
+test("open messages use the compact ellipsis actions menu", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    window.localStorage.setItem(
+      "buzz.quick-reaction-emojis.v1:e2e-default-community",
+      JSON.stringify([{ count: 2, emoji: "🔥", lastUsedAt: Date.now() }]),
+    );
+  });
+  await installMockBridge(page);
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const row = page
+    .getByTestId("message-row")
+    .filter({ hasText: "React to me with a custom emoji" })
+    .last();
+  await expect(row).toBeVisible();
+  await row.hover();
+
+  const actionBar = row.locator('[data-testid^="message-action-bar-"]');
+  await expect(actionBar).toHaveAttribute("data-presentation", "menu");
+  await expect(
+    actionBar.getByRole("button", { name: "More actions" }),
+  ).toBeVisible();
+  await expect(
+    actionBar.getByRole("button", { name: "Open reactions" }),
+  ).toHaveCount(0);
+  await expect(actionBar.getByRole("button", { name: "Reply" })).toHaveCount(0);
+
+  const [rowBox, actionBarBox] = await Promise.all([
+    row.boundingBox(),
+    actionBar.boundingBox(),
+  ]);
+  if (!rowBox || !actionBarBox) {
+    throw new Error("Expected open message action geometry.");
+  }
+  expect(actionBarBox.y).toBeGreaterThanOrEqual(rowBox.y);
+  expect(actionBarBox.x + actionBarBox.width).toBeLessThanOrEqual(
+    rowBox.x + rowBox.width + 1,
+  );
+
+  await actionBar.getByRole("button", { name: "More actions" }).click();
+  await expect(page.getByRole("menu")).toBeVisible();
+  const quickReactions = page.locator(
+    '[data-testid^="message-quick-reactions-"]',
+  );
+  await expect(quickReactions).toBeVisible();
+  await expect(
+    quickReactions.getByRole("button", { name: /^React with / }),
+  ).toHaveCount(5);
+  await expect(
+    page.getByRole("menuitem", { name: "Reply", exact: true }),
+  ).toBeVisible();
+
+  await waitForAnimations(page);
+  await page.screenshot({ path: `${SHOTS}/open-message-actions.png` });
+});
+
 test("left-aligned continuation bubbles join on the left edge", async ({
   page,
 }) => {

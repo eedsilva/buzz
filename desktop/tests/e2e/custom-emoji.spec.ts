@@ -3,6 +3,10 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 import { installMockBridge } from "../helpers/bridge";
+import {
+  openMessageReactionPicker,
+  selectMessageQuickReaction,
+} from "../helpers/messageActions";
 import { waitForAnimations } from "../helpers/animations";
 
 // Custom-emoji end-to-end guard.
@@ -285,28 +289,17 @@ async function quickReactionStorageContains(
   }, emoji);
 }
 
-test("message quick reaction tray stays neutral after selecting a tray emoji", async ({
+test("message quick reaction menu closes after selecting an emoji", async ({
   page,
 }) => {
   await openGeneral(page);
 
   const row = reactionTargetRow(page);
   await expect(row).toBeVisible();
-  await row.hover();
-
-  const quickReactionButton = row.getByRole("button", {
-    name: "React with :+1:",
-  });
-  await expect(quickReactionButton).toBeVisible();
-  await quickReactionButton.click();
+  await selectMessageQuickReaction(row, "React with :+1:");
 
   await expect(row.getByLabel("Toggle 👍 reaction")).toBeVisible();
-  await row.hover();
-  await expect(quickReactionButton).not.toHaveAttribute("aria-pressed", "true");
-  await expect(quickReactionButton).not.toHaveClass(SELECTED_ACTION_CLASS);
-  await expect(messageReactionTrigger(row)).not.toHaveClass(
-    SELECTED_ACTION_CLASS,
-  );
+  await expect(page.getByRole("menu")).toHaveCount(0);
 });
 
 test("reacting with a custom emoji renders via the loopback media proxy", async ({
@@ -318,8 +311,7 @@ test("reacting with a custom emoji renders via the loopback media proxy", async 
   // open the reaction picker.
   const row = reactionTargetRow(page);
   await expect(row).toBeVisible();
-  await row.hover();
-  await row.getByLabel("Open reactions").click();
+  await openMessageReactionPicker(row);
 
   // emoji-mart renders inside a Shadow DOM web component. Search by shortcode
   // to surface the custom emoji, then click it.
@@ -539,8 +531,7 @@ test("a system message accepts a custom-emoji reaction", async ({ page }) => {
 
   const row = page.getByTestId("system-message-row").first();
   await expect(row).toBeVisible();
-  await row.hover();
-  await row.getByLabel("Open reactions").click();
+  await openMessageReactionPicker(row);
 
   const picker = page.locator("em-emoji-picker");
   await picker.locator("input[type='search']").fill(REACTION_SHORTCODE);
@@ -563,8 +554,7 @@ test("emoji picker search input has spellcheck, autocorrect, and autocapitalize 
   // Open the reaction picker on the seeded reactable message.
   const row = reactionTargetRow(page);
   await expect(row).toBeVisible();
-  await row.hover();
-  await row.getByLabel("Open reactions").click();
+  await openMessageReactionPicker(row);
 
   // Wait for the picker to be visible, then read the shadow-root input attributes.
   const picker = page.locator("em-emoji-picker");
@@ -599,8 +589,7 @@ test("emoji picker search input is focused immediately on open (no manual click 
   // focus via our shadow traversal before the user interacts.
   const row = reactionTargetRow(page);
   await expect(row).toBeVisible();
-  await row.hover();
-  await row.getByLabel("Open reactions").click();
+  await openMessageReactionPicker(row);
 
   const picker = page.locator("em-emoji-picker");
   await expect(picker.locator("input[type='search']")).toBeVisible();

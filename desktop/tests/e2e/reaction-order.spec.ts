@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 import { installMockBridge } from "../helpers/bridge";
+import { selectMessageQuickReaction } from "../helpers/messageActions";
 import { waitForAnimations } from "../helpers/animations";
 
 // Reaction ordering end-to-end guard.
@@ -97,10 +98,7 @@ async function addQuickReaction(
   emoji: string,
   label: string,
 ) {
-  await row.hover();
-  const btn = row.getByRole("button", { name: `React with ${label}` });
-  await expect(btn).toBeVisible();
-  await btn.click();
+  await selectMessageQuickReaction(row, `React with ${label}`);
   // Wait for the optimistic pill to appear before continuing.
   await expect(
     row

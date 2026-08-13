@@ -3,6 +3,7 @@ import { expect, test, type Locator } from "@playwright/test";
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 import { expectCornerRadiusPx, expectSmoothCorners } from "../helpers/css";
+import { selectMessageAction } from "../helpers/messageActions";
 import { openSettings } from "../helpers/settings";
 
 async function waitForReadyComposerSnapshots(
@@ -2575,7 +2576,7 @@ test("thread panel width uses session storage and reset handle", async ({
   );
 
   await rootMessage.hover();
-  await rootMessage.getByRole("button", { name: "Reply" }).click();
+  await selectMessageAction(rootMessage, "Reply");
   await expect(threadPanel).toBeVisible();
 
   await expect
@@ -2636,7 +2637,7 @@ test("thread panel width uses session storage and reset handle", async ({
   await expect(threadPanel).toBeHidden();
 
   await rootMessage.hover();
-  await rootMessage.getByRole("button", { name: "Reply" }).click();
+  await selectMessageAction(rootMessage, "Reply");
   await expect(threadPanel).toBeVisible();
 
   await expect
@@ -2663,8 +2664,7 @@ test("narrow thread view collapses channel header actions into a menu", async ({
   const rootMessage = page.locator('[data-message-id="mock-general-alice"]');
   const threadPanel = page.getByTestId("message-thread-panel");
 
-  await rootMessage.hover();
-  await page.getByTestId("reply-message-mock-general-alice").click();
+  await selectMessageAction(rootMessage, "Reply");
   await expect(threadPanel).toBeVisible();
   await expect(threadPanel.getByTestId("message-thread-back")).toHaveCount(0);
 
@@ -2707,8 +2707,7 @@ test("single-panel thread view hides channel actions", async ({ page }) => {
   const rootMessage = page.locator('[data-message-id="mock-general-alice"]');
   const threadPanel = page.getByTestId("message-thread-panel");
 
-  await rootMessage.hover();
-  await page.getByTestId("reply-message-mock-general-alice").click();
+  await selectMessageAction(rootMessage, "Reply");
   await expect(threadPanel).toBeVisible();
   await expect(threadPanel.getByTestId("message-thread-back")).toBeVisible();
   await expect(page.getByTestId("channel-actions-menu-trigger")).toHaveCount(0);
@@ -2765,7 +2764,7 @@ test("thread composer is focused after clicking the reply icon", async ({
     .getByTestId("message-row")
     .last();
   await rootMessage.hover();
-  await rootMessage.getByRole("button", { name: "Reply" }).click();
+  await selectMessageAction(rootMessage, "Reply");
 
   const threadPanel = page.getByTestId("message-thread-panel");
   await expect(threadPanel).toBeVisible();
@@ -2793,7 +2792,7 @@ test("thread refetch preserves a live reply and reaction received in flight", as
   if (!rootId) throw new Error("Expected a thread root id.");
 
   await rootMessage.hover();
-  await rootMessage.getByRole("button", { name: "Reply" }).click();
+  await selectMessageAction(rootMessage, "Reply");
   const threadPanel = page.getByTestId("message-thread-panel");
   await expect(threadPanel).toBeVisible();
 
@@ -2852,7 +2851,7 @@ test("thread reply appears after relay closes and restores its live subscription
     .getByTestId("message-row")
     .last();
   await rootMessage.hover();
-  await rootMessage.getByRole("button", { name: "Reply" }).click();
+  await selectMessageAction(rootMessage, "Reply");
 
   const threadPanel = page.getByTestId("message-thread-panel");
   const reply = `Thread reply after CLOSED ${Date.now()}`;
@@ -2882,7 +2881,7 @@ test("thread composer keeps focus after sending a thread reply", async ({
     .getByTestId("message-row")
     .last();
   await rootMessage.hover();
-  await rootMessage.getByRole("button", { name: "Reply" }).click();
+  await selectMessageAction(rootMessage, "Reply");
 
   const threadPanel = page.getByTestId("message-thread-panel");
   await expect(threadPanel).toBeVisible();
@@ -2992,7 +2991,7 @@ test("ArrowUp edits your last thread reply right after sending it", async ({
     .getByTestId("message-row")
     .last();
   await rootMessage.hover();
-  await rootMessage.getByRole("button", { name: "Reply" }).click();
+  await selectMessageAction(rootMessage, "Reply");
 
   const threadPanel = page.getByTestId("message-thread-panel");
   await expect(threadPanel).toBeVisible();
@@ -3036,7 +3035,7 @@ test("action bar stays within the timeline when the thread panel is open", async
 
   const rootMessage = timeline.getByTestId("message-row").first();
   await rootMessage.hover();
-  await rootMessage.getByRole("button", { name: "Reply" }).click();
+  await selectMessageAction(rootMessage, "Reply");
   await expect(page.getByTestId("message-thread-panel")).toBeVisible();
 
   const wideRow = timeline.getByTestId("message-row").last();
