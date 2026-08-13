@@ -242,58 +242,61 @@ class _ThreadContent extends HookConsumerWidget {
     return Column(
       children: [
         Expanded(
-          child: ListView(
-            padding: EdgeInsets.only(
-              top: frostedAppBarHeight(context),
-              bottom: Grid.xs,
-            ),
-            children: [
-              _OriginalPost(post: post),
-
-              Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: Grid.gutter,
-                  vertical: Grid.xxs,
-                ),
-                child: Row(
-                  children: [
-                    Icon(
-                      LucideIcons.messageSquare,
-                      size: 16,
-                      color: context.colors.onSurfaceVariant,
-                    ),
-                    const SizedBox(width: Grid.half),
-                    Text(
-                      '${replies.length} ${replies.length == 1 ? 'reply' : 'replies'}',
-                      style: context.textTheme.labelMedium?.copyWith(
+          child: CustomScrollView(
+            slivers: [
+              SliverPadding(
+                padding: EdgeInsets.only(top: frostedAppBarHeight(context)),
+                sliver: SliverToBoxAdapter(child: _OriginalPost(post: post)),
+              ),
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: Grid.gutter,
+                    vertical: Grid.xxs,
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(
+                        LucideIcons.messageSquare,
+                        size: 16,
                         color: context.colors.onSurfaceVariant,
-                        fontWeight: FontWeight.w600,
                       ),
-                    ),
-                  ],
+                      const SizedBox(width: Grid.half),
+                      Text(
+                        '${replies.length} ${replies.length == 1 ? 'reply' : 'replies'}',
+                        style: context.textTheme.labelMedium?.copyWith(
+                          color: context.colors.onSurfaceVariant,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
-
-              // Reply list
               if (replies.isEmpty)
-                Padding(
-                  padding: const EdgeInsets.all(Grid.sm),
-                  child: Text(
-                    'No replies yet. Be the first to respond.',
-                    style: context.textTheme.bodyMedium?.copyWith(
-                      color: context.colors.onSurfaceVariant,
+                SliverToBoxAdapter(
+                  child: Padding(
+                    padding: const EdgeInsets.all(Grid.sm),
+                    child: Text(
+                      'No replies yet. Be the first to respond.',
+                      style: context.textTheme.bodyMedium?.copyWith(
+                        color: context.colors.onSurfaceVariant,
+                      ),
+                      textAlign: TextAlign.center,
                     ),
-                    textAlign: TextAlign.center,
                   ),
                 )
               else
-                for (final reply in replies)
-                  _ReplyRow(
-                    reply: reply,
+                SliverList.builder(
+                  itemCount: replies.length,
+                  itemBuilder: (context, index) => _ReplyRow(
+                    reply: replies[index],
                     currentPubkey: currentPubkey,
                     channelId: channelId,
                     rootEventId: post.eventId,
                   ),
+                ),
+              const SliverToBoxAdapter(child: SizedBox(height: Grid.xs)),
             ],
           ),
         ),

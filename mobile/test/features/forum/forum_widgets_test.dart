@@ -588,6 +588,51 @@ void main() {
       expect(find.text('Bob'), findsOneWidget);
     });
 
+    testWidgets('lazily builds forum replies', (tester) async {
+      _setSurfaceSize(tester, const Size(320, 640));
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+      final replies = [
+        for (var index = 0; index < 200; index++)
+          ThreadReply(
+            eventId: 'reply-$index',
+            pubkey: 'bob',
+            content: 'Reply $index',
+            kind: 45003,
+            createdAt: 2000 + index,
+            channelId: _channelId,
+            tags: const [
+              ['h', _channelId],
+            ],
+            depth: 1,
+          ),
+      ];
+
+      await tester.pumpWidget(
+        _buildThreadPage(
+          threadResponse: ForumThreadResponse(
+            post: _makePost(),
+            replies: replies,
+            totalReplies: replies.length,
+          ),
+          users: const {
+            'alice': _aliceProfile,
+            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+        ),
+      );
+      await tester.pump();
+
+      expect(find.text('Reply 0'), findsOneWidget);
+      expect(
+        find.text('Reply 199'),
+        findsNothing,
+        reason: 'Offscreen forum replies must not be eagerly mounted.',
+      );
+    });
+
     testWidgets('constrains post and reply timestamps at large text sizes', (
       tester,
     ) async {
