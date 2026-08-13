@@ -944,7 +944,15 @@ export function ChannelScreen({
                   threadAllMessages={displayedThreadAllMessages}
                   threadHeadMessage={displayedThreadHeadMessage}
                   threadMessages={displayedThreadMessages}
+                  threadMessagesError={
+                    threadRepliesQuery.error instanceof Error
+                      ? threadRepliesQuery.error.message
+                      : null
+                  }
                   threadMessagesPending={threadRepliesQuery.isPending}
+                  onRetryThreadMessages={() => {
+                    void threadRepliesQuery.refetch();
+                  }}
                   threadPanelWidthPx={threadPanelWidthPx}
                   threadTypingPubkeys={threadTypingPubkeys}
                   threadReplyTargetMessage={displayedThreadReplyTargetMessage}

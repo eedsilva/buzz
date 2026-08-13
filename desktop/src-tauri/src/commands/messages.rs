@@ -263,7 +263,8 @@ pub async fn get_thread_replies(
         cursor.as_ref(),
     );
 
-    let events = query_relay(&state, &[serde_json::Value::Object(filter)]).await?;
+    let events =
+        crate::relay::query_relay_interactive(&state, &[serde_json::Value::Object(filter)]).await?;
 
     // A full page implies there may be more; hand back the last event's
     // composite key as the next cursor (the DB returns replies strictly after

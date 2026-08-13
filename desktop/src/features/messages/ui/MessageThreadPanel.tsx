@@ -1,6 +1,5 @@
 import * as React from "react";
 import { ArrowDown } from "lucide-react";
-
 import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
 import { HuddleTranscriptIntro } from "@/features/huddle/components/HuddleTranscriptIntro";
 import { orderMentionPubkeysByText } from "@/features/messages/lib/orderMentionPubkeys";
@@ -43,6 +42,7 @@ import { Separator } from "@/shared/ui/separator";
 import { ComposerActivityAccessory } from "./ComposerActivityAccessory";
 import { ComposerDockBackdrop } from "./ComposerDockBackdrop";
 import { MessageComposer } from "./MessageComposer";
+import { ThreadRepliesLoadState } from "./ThreadRepliesLoadState";
 import { ThreadMessageSkeleton } from "./MessageThreadPanelSkeleton";
 import { MessageRow, type ThreadDepthGuideAction } from "./MessageRow";
 import { MessageThreadSummaryRow } from "./MessageThreadSummaryRow";
@@ -52,7 +52,6 @@ import { useComposerHeightPadding } from "./useComposerHeightPadding";
 import { useStableSendToChannel } from "./useStableSendToChannel";
 import { useAnchoredScroll } from "./useAnchoredScroll";
 import { selectDeferredListRenderState } from "@/features/messages/lib/timelineSnapshot";
-
 type MessageThreadPanelProps = ThreadPanelLayoutProps & {
   channel: Channel | null;
   channelId: string | null;
@@ -109,7 +108,9 @@ type MessageThreadPanelProps = ThreadPanelLayoutProps & {
   scrollTargetId: string | null;
   threadHead: TimelineMessage | null;
   threadReplies: MainTimelineEntry[];
+  threadRepliesError?: string | null;
   threadRepliesPending?: boolean;
+  onRetryThreadReplies?: () => void;
   threadUnreadCount?: number;
   threadReplyUnreadCounts?: ReadonlyMap<string, number>;
   threadTypingPubkeys: string[];
@@ -131,10 +132,8 @@ type MessageThreadPanelProps = ThreadPanelLayoutProps & {
   /** Called when the thread-composer auto-submit fires so the parent can clear the trigger. */
   onAutoSubmitComplete?: () => void;
 };
-
 const EMPTY_THREAD_REPLIES: MainTimelineEntry[] = [];
 const THREAD_PANEL_SUMMARY_INDENT_OFFSET_REM = 0;
-
 function hasLaterVisibleSibling(
   entries: readonly MainTimelineEntry[],
   entryIndex: number,
@@ -185,7 +184,6 @@ function getActiveContinuationDepths({
 
   return depths;
 }
-
 export function MessageThreadPanel({
   channel,
   channelId,
@@ -230,7 +228,9 @@ export function MessageThreadPanel({
   threadHead,
   videoReviewPresentation,
   threadReplies,
+  threadRepliesError = null,
   threadRepliesPending = false,
+  onRetryThreadReplies,
   threadUnreadCount,
   threadReplyUnreadCounts,
   threadTypingPubkeys,
@@ -647,7 +647,12 @@ export function MessageThreadPanel({
           className={cn(THREAD_PANEL_MESSAGE_GUTTER_CLASS, "pb-3 pt-0")}
           data-testid="message-thread-replies"
         >
-          {threadRepliesPending && !isHuddleTranscript ? (
+          {threadRepliesError && !isHuddleTranscript ? (
+            <ThreadRepliesLoadState
+              error={threadRepliesError}
+              onRetry={onRetryThreadReplies}
+            />
+          ) : threadRepliesPending && !isHuddleTranscript ? (
             <div
               className="space-y-2.5 pt-1"
               data-testid="message-thread-replies-loading"
