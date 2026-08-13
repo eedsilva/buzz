@@ -3099,3 +3099,92 @@ test("feedback-list-refetches-on-back-after-mutation: changing status then navig
 
   await unmount();
 });
+
+test("resolve-rejection-surfaces-parsed-message: a rejected resolve toasts the relay message, not raw JSON", async () => {
+  // A resolve mutation that the relay rejects (e.g. invalid_action_for_target)
+  // must surface the envelope's human message via toast.error — never the raw
+  // JSON envelope and never a success toast.
+  //
+  // Mutation evidence: replace `toast.error(adminErrorMessage(e))` in
+  // handleSubmit with `toast.error(String(e))` → the raw-JSON assertion goes
+  // red because the envelope leaks verbatim.
+
+  const origin = "https://admin.example.com";
+  const pubkey = "f7".repeat(32);
+
+  const openItem = {
+    id: "00000000-0000-0000-0000-0000000000f7",
+    communityId: "comm-1",
+    communityHost: "alpha.example.com",
+    reportEventId: "aa",
+    reporterPubkey: "bb",
+    targetKind: "event",
+    target: "cc",
+    reportType: "spam",
+    status: "open",
+    createdAt: "2024-06-01T12:00:00Z",
+  };
+  const openDetail = {
+    ...openItem,
+    channelId: "00000000-0000-0000-0000-0000000000ff",
+    note: null,
+    resolvedBy: null,
+    resolvedAt: null,
+    actionId: null,
+    message: null,
+  };
+
+  const humanMessage =
+    "action kick requires the report to have an associated channel";
+  // The native command rejects with `admin API error: {envelope}` — exactly the
+  // shape adminErrorMessage strips down to the envelope's `message`.
+  const rawError = `admin API error: {"error":{"code":"invalid_action_for_target","message":"${humanMessage}","requestId":"00000000-0000-0000-0000-0000000000e7"}}`;
+
+  setIpcHandler("admin_list_reports", () => Promise.resolve([openItem]));
+  setIpcHandler("admin_get_report", () => Promise.resolve(openDetail));
+  setIpcHandler("admin_list_feedback", () => Promise.resolve([]));
+  setIpcHandler("admin_resolve_report", () =>
+    Promise.reject(new Error(rawError)),
+  );
+
+  const { container, doRender, unmount } = mountPanel({ origin, pubkey });
+  await doRender();
+  await settle(30);
+  await openFirstReportDetail(container);
+  await settle(20);
+
+  // Select the kick action, then submit — the relay rejects it.
+  const kickBtn = container.querySelector("[data-testid='action-btn-kick']");
+  assert.ok(kickBtn, "kick action must be present (channel is set)");
+  await act(async () => {
+    fireEvent.click(kickBtn);
+    await new Promise((r) => setTimeout(r, 10));
+  });
+  const submit = container.querySelector("[data-testid='resolve-submit-btn']");
+  assert.ok(submit, "resolve submit button must appear after selecting kick");
+  await act(async () => {
+    fireEvent.click(submit);
+    await new Promise((r) => setTimeout(r, 30));
+  });
+  await settle(20);
+
+  // The parsed human message reaches toast.error.
+  assert.ok(
+    capturedErrorToasts.some((m) => m.includes(humanMessage)),
+    `the parsed relay message must surface via toast.error; got: ${JSON.stringify(capturedErrorToasts)}`,
+  );
+  // The raw JSON envelope must NOT leak into any error toast.
+  assert.ok(
+    !capturedErrorToasts.some(
+      (m) => m.includes('{"error"') || m.includes("admin API error:"),
+    ),
+    `the raw JSON envelope must not appear in an error toast; got: ${JSON.stringify(capturedErrorToasts)}`,
+  );
+  // No success toast on a rejected resolve.
+  assert.ok(
+    !capturedToasts.some((m) => m.toLowerCase().includes("resolved")),
+    `no success toast on a rejected resolve; got: ${JSON.stringify(capturedToasts)}`,
+  );
+
+  await unmount();
+});

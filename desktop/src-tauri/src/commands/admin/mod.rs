@@ -172,14 +172,16 @@ async fn admin_probe_inner(
         return Ok(AdminProbeResult::NetworkOrIntercepted);
     }
 
-    // Step 3: success without auth → disabled mode (if body is a valid probe).
+    // Step 3: success without auth → disabled mode (only when the body is a
+    // coherent disabled-mode probe: status ok, authMode disabled, no
+    // principal, no capabilities). A 200 in any other shape or mode is a
+    // contract violation (token/nip98 must 401 an unauthenticated caller);
+    // classify defensively.
     if resp.status().is_success() {
         let content_type = response_content_type(&resp);
         let bytes = read_bounded(resp, PROBE_JSON_CAP).await?;
         return Ok(match parse_probe(&content_type, &bytes) {
-            Some(p) if p.auth_mode == "disabled" => AdminProbeResult::Disabled,
-            // A 200 in any other mode is a contract violation (token/nip98
-            // must 401 an unauthenticated caller); classify defensively.
+            Some(p) if p.is_coherent_disabled() => AdminProbeResult::Disabled,
             _ => AdminProbeResult::NotAdminApi,
         });
     }
@@ -223,11 +225,16 @@ async fn admin_probe_inner(
                 let content_type = response_content_type(&auth_resp);
                 let bytes = read_bounded(auth_resp, PROBE_JSON_CAP).await?;
                 return Ok(match parse_probe(&content_type, &bytes) {
-                    // Relay resolves role/source for the authenticated
-                    // principal; carry them through for the staffing tab.
-                    Some(p) => AdminProbeResult::Nip98Authorized {
-                        role: p.role,
-                        source: p.source,
+                    // Trust the 2xx only when the full NIP-98 invariant holds;
+                    // carry the relay-resolved role/source for the staffing tab.
+                    Some(p) => match p.authorized_principal() {
+                        Some((role, source)) => AdminProbeResult::Nip98Authorized {
+                            role: Some(role.as_str().to_string()),
+                            source: Some(source.as_str().to_string()),
+                        },
+                        // Structurally a probe body but not a coherent
+                        // authorized NIP-98 response: fail closed.
+                        None => AdminProbeResult::NotAdminApi,
                     },
                     // 2xx but not a probe shape: endpoint exists but isn't
                     // the admin API.
@@ -296,21 +303,107 @@ async fn read_bounded(resp: reqwest::Response, cap: u64) -> Result<Vec<u8>, Stri
 /// The relay's `/probe` response contract (`ProbeResponse` in the relay's
 /// `api/admin/mod.rs`, serialised `rename_all = "camelCase"`).
 ///
-/// Only the fields the desktop consumes are typed. `role`/`source` are
-/// present (non-null) only in nip98 mode with a resolved principal; they are
-/// `null` in token/disabled modes.
+/// All six fields are required and typed; deserialisation rejects a body that
+/// omits any field or carries a wrong-typed one, so an unrelated JSON endpoint
+/// cannot be mistaken for the admin API. Unknown fields are tolerated for
+/// forward compatibility. Structural validity alone does NOT authorize: a
+/// deserialised `ProbeWire` still has to pass [`ProbeWire::authorized_principal`]
+/// or [`ProbeWire::is_coherent_disabled`] before its state is trusted.
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ProbeWire {
-    #[allow(dead_code)]
     status: String,
     auth_mode: String,
     role: Option<String>,
     source: Option<String>,
-    #[allow(dead_code)]
     can_act: bool,
-    #[allow(dead_code)]
     can_staff: bool,
+}
+
+/// The relay's resolved principal role. Closed vocabulary — an unknown string
+/// fails to parse and denies authorization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeRole {
+    Operator,
+    Moderator,
+}
+
+impl ProbeRole {
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "operator" => Some(Self::Operator),
+            "moderator" => Some(Self::Moderator),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Operator => "operator",
+            Self::Moderator => "moderator",
+        }
+    }
+}
+
+/// How the relay established the principal's role. Closed vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeSource {
+    Config,
+    OwnerFallback,
+    Db,
+}
+
+impl ProbeSource {
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "config" => Some(Self::Config),
+            "owner_fallback" => Some(Self::OwnerFallback),
+            "db" => Some(Self::Db),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Config => "config",
+            Self::OwnerFallback => "owner_fallback",
+            Self::Db => "db",
+        }
+    }
+}
+
+impl ProbeWire {
+    /// Validate the complete NIP-98 authorization invariant and return the
+    /// typed principal only when every field is coherent with the relay
+    /// contract: `status == "ok"`, `authMode == "nip98"`, a recognised
+    /// non-null `role`/`source`, `canAct == true`, and
+    /// `canStaff == (role == operator)`. Any deviation yields `None`, so the
+    /// caller classifies the response `NotAdminApi` rather than trusting a
+    /// fail-open 2xx.
+    fn authorized_principal(&self) -> Option<(ProbeRole, ProbeSource)> {
+        if self.status != "ok" || self.auth_mode != "nip98" {
+            return None;
+        }
+        let role = ProbeRole::parse(self.role.as_deref()?)?;
+        let source = ProbeSource::parse(self.source.as_deref()?)?;
+        if !self.can_act || self.can_staff != (role == ProbeRole::Operator) {
+            return None;
+        }
+        Some((role, source))
+    }
+
+    /// Validate the disabled-mode invariant for an unauthenticated 200:
+    /// `status == "ok"`, `authMode == "disabled"`, no principal, no
+    /// capabilities. Any deviation is a contract violation (token/nip98 must
+    /// 401 an unauthenticated caller).
+    fn is_coherent_disabled(&self) -> bool {
+        self.status == "ok"
+            && self.auth_mode == "disabled"
+            && self.role.is_none()
+            && self.source.is_none()
+            && !self.can_act
+            && !self.can_staff
+    }
 }
 
 /// Parse a `/probe` response body into a [`ProbeWire`], returning `None` when
