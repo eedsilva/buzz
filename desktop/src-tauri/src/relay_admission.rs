@@ -1,31 +1,32 @@
 //! Admission gate for relay HTTP bridge requests.
 //!
-//! When the relay answers 429, every relay-backed HTTP request must hold new
-//! sends until the quota window clears — matching the TS-side gate in
-//! `relayRateLimitGate.ts` that already governs WebSocket operations.
+//! Relay quotas are scoped to the authenticated principal. When the relay
+//! answers 429, requests authenticated as that same principal must hold new
+//! sends until its quota window clears — matching the TS-side gate in
+//! `relayRateLimitGate.ts` that already governs owner WebSocket operations.
 //!
-//! **Coverage:** all entry points in `relay.rs` (`query_relay_at`,
-//! `submit_event`, `submit_signed_event`, `submit_signed_event_with_keys`,
-//! `sync_managed_agent_profile`) and the three previously-direct senders
-//! (`submit_engram_event` in snapshot import + team_snapshot, huddle STT)
-//! all call `wait_for_rate_limit()` before `.send()`.
+//! **Coverage:** owner-authenticated entry points use `wait_for_rate_limit()`;
+//! explicit-key entry points use `wait_for_rate_limit_for(pubkey)`. Every 429
+//! must arm the gate under the same principal used by its request.
 //!
-//! **Media upload/download and `/info`** call `relay_error_message()` on
-//! non-200 responses, so their 429s arm the shared gate as conservative
-//! back-off (any relay overload signal is worth honouring across domains).
-//! They do not call `wait_for_rate_limit()` themselves — their operations
-//! are driven by user-initiated file transfers rather than bridge event flow,
-//! and they have independent retry logic.
+//! **Media upload/download and `/info`** are owner-authenticated and call
+//! `relay_error_message()` on non-200 responses, so their 429s arm the owner
+//! gate as conservative back-off. They do not wait themselves because their
+//! operations are user-initiated file transfers with independent retry logic.
 //!
-//! **Community scope:** the gate is reset on every `apply_workspace` call,
-//! mirroring the TS gate's `resetRateLimitGate()` on community switch in
+//! **Community scope:** all principal gates are reset on every `apply_workspace`
+//! call, mirroring the TS gate's `resetRateLimitGate()` on community switch in
 //! `useCommunityInit.ts`. A 429 from community A cannot stall community B.
 //!
-//! Mirrors the TS gate's semantics: overlapping hints never shrink the window,
-//! and a hint-less 429 arms the same 10-second default.
+//! Mirrors the TS gate's semantics: overlapping hints never shrink a
+//! principal's window, and a hint-less 429 arms the same 10-second default.
 
-use std::sync::Mutex;
-use tokio::time::{sleep_until, Duration, Instant};
+use std::{collections::HashMap, sync::Mutex};
+use tokio::time::{sleep_until, timeout, Duration, Instant};
+
+/// Interactive reads should surface relay back-pressure instead of leaving a
+/// panel apparently empty for the relay's full quota window.
+const INTERACTIVE_WAIT_LIMIT: Duration = Duration::from_secs(5);
 
 /// Minimum gate duration when the relay provides no `retry in Ns` hint.
 /// Deliberately equal to `DEFAULT_RATE_LIMIT_SECONDS` in `relayRateLimitGate.ts`
@@ -40,9 +41,25 @@ const DEFAULT_RATE_LIMIT_SECONDS: u64 = 10;
 /// `applyTauriRateLimitIfNeeded`) sees the same capped value.
 pub const MAX_HINT_SECONDS: u64 = 300;
 
-static GATE_EXPIRY: Mutex<Option<Instant>> = Mutex::new(None);
+static GATE_EXPIRIES: std::sync::LazyLock<Mutex<HashMap<String, Instant>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
-// The gate is process-wide, so every test that can arm it must serialize.
+fn principal_key(principal: &str) -> String {
+    principal.to_ascii_lowercase()
+}
+
+pub(crate) const WORKSPACE_PRINCIPAL: &str = "workspace-owner";
+
+#[cfg(test)]
+pub fn activate_rate_limit(retry_in_seconds: Option<u64>) {
+    activate_rate_limit_for(WORKSPACE_PRINCIPAL, retry_in_seconds);
+}
+
+pub async fn wait_for_rate_limit() {
+    wait_for_rate_limit_for(WORKSPACE_PRINCIPAL).await;
+}
+
+// The principal map is process-wide, so every test that can arm it must serialize.
 #[cfg(test)]
 pub(crate) static TEST_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -53,7 +70,16 @@ pub(crate) static TEST_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::cons
 /// `DEFAULT_RATE_LIMIT_SECONDS`. The expiry only ever moves forward: a shorter
 /// hint arriving under a longer active window is ignored, so overlapping 429s
 /// never schedule a premature retry.
-pub fn activate_rate_limit(retry_in_seconds: Option<u64>) {
+#[cfg(test)]
+pub fn activate_rate_limit_for(principal: &str, retry_in_seconds: Option<u64>) {
+    activate_rate_limit_for_endpoint(principal, "unknown", retry_in_seconds);
+}
+
+pub fn activate_rate_limit_for_endpoint(
+    principal: &str,
+    endpoint: &str,
+    retry_in_seconds: Option<u64>,
+) {
     let secs = match retry_in_seconds {
         Some(s) if s > 0 => s.min(MAX_HINT_SECONDS),
         _ => DEFAULT_RATE_LIMIT_SECONDS,
@@ -61,24 +87,37 @@ pub fn activate_rate_limit(retry_in_seconds: Option<u64>) {
     let new_expiry = Instant::now()
         .checked_add(Duration::from_secs(secs))
         .unwrap_or_else(|| Instant::now() + Duration::from_secs(DEFAULT_RATE_LIMIT_SECONDS));
-    let mut guard = GATE_EXPIRY.lock().unwrap_or_else(|e| e.into_inner());
-    match *guard {
-        Some(current) if new_expiry <= current => {}
-        _ => *guard = Some(new_expiry),
+    let mut guard = GATE_EXPIRIES.lock().unwrap_or_else(|e| e.into_inner());
+    let expiry = guard.entry(principal_key(principal)).or_insert(new_expiry);
+    if new_expiry > *expiry {
+        *expiry = new_expiry;
     }
+    eprintln!(
+        "buzz-desktop: relay rate-limit gate armed: endpoint={endpoint} principal={} retry_in_seconds={secs}",
+        if principal == WORKSPACE_PRINCIPAL {
+            "workspace-owner"
+        } else {
+            "explicit-key"
+        },
+    );
 }
 
-/// Wait until the admission gate is clear.
+/// Wait until this relay principal's admission gate is clear.
 ///
 /// Returns immediately when no gate is active. Loops after sleeping because a
 /// concurrent 429 may extend the expiry while this caller is parked.
-pub async fn wait_for_rate_limit() {
+pub async fn wait_for_rate_limit_for(principal: &str) {
+    let principal = principal_key(principal);
     loop {
         let expiry = {
-            let guard = GATE_EXPIRY.lock().unwrap_or_else(|e| e.into_inner());
-            match *guard {
+            let mut guard = GATE_EXPIRIES.lock().unwrap_or_else(|e| e.into_inner());
+            match guard.get(&principal).copied() {
                 Some(expiry) if expiry > Instant::now() => Some(expiry),
-                _ => None,
+                Some(_) => {
+                    guard.remove(&principal);
+                    None
+                }
+                None => None,
             }
         };
         match expiry {
@@ -88,27 +127,58 @@ pub async fn wait_for_rate_limit() {
     }
 }
 
+/// Wait briefly for the workspace owner's gate, then return a typed error so
+/// an interactive surface can render back-pressure instead of hanging.
+pub async fn wait_for_interactive_rate_limit() -> Result<(), String> {
+    match timeout(INTERACTIVE_WAIT_LIMIT, wait_for_rate_limit()).await {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            let remaining = remaining_seconds_for(WORKSPACE_PRINCIPAL).unwrap_or_default();
+            Err(format!(
+                "relay rate-limited: retry in {remaining}s; try again shortly"
+            ))
+        }
+    }
+}
+
+fn remaining_seconds_for(principal: &str) -> Option<u64> {
+    let principal = principal_key(principal);
+    let now = Instant::now();
+    let mut guard = GATE_EXPIRIES.lock().unwrap_or_else(|e| e.into_inner());
+    match guard.get(&principal).copied() {
+        Some(expiry) if expiry > now => Some((expiry - now).as_secs().max(1)),
+        Some(_) => {
+            guard.remove(&principal);
+            None
+        }
+        None => None,
+    }
+}
+
 /// Reset the gate on a workspace/community change.
 ///
 /// Called by `apply_workspace` to ensure a 429 from community A does not stall
 /// requests to community B. Mirrors `resetRateLimitGate()` in
 /// `useCommunityInit.ts`.
 pub fn reset_gate_for_workspace_change() {
-    *GATE_EXPIRY.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    GATE_EXPIRIES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
 }
 
 /// Reset the gate. Test-only: production never clears an armed window early
 /// except via `reset_gate_for_workspace_change`.
 #[cfg(test)]
 pub fn reset_rate_limit_gate() {
-    *GATE_EXPIRY.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    reset_gate_for_workspace_change();
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // The gate is a process-wide static shared by every test in this binary,
+    // The principal map is a process-wide static shared by every test in this binary,
     // so all tests that arm it serialize on one async lock to keep expiries
     // from bleeding between parallel test threads.
 
@@ -123,6 +193,33 @@ mod tests {
             start,
             "inactive gate must not consume any (paused) time"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn interactive_wait_returns_typed_error_after_five_seconds() {
+        let _serial = TEST_SERIAL.lock().await;
+        reset_rate_limit_gate();
+        activate_rate_limit(Some(60));
+
+        let start = Instant::now();
+        let error = wait_for_interactive_rate_limit().await.unwrap_err();
+
+        assert_eq!(Instant::now() - start, INTERACTIVE_WAIT_LIMIT);
+        assert_eq!(error, "relay rate-limited: retry in 55s; try again shortly");
+        reset_rate_limit_gate();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn interactive_wait_succeeds_when_gate_clears_within_limit() {
+        let _serial = TEST_SERIAL.lock().await;
+        reset_rate_limit_gate();
+        activate_rate_limit(Some(2));
+
+        let start = Instant::now();
+        wait_for_interactive_rate_limit().await.unwrap();
+
+        assert_eq!(Instant::now() - start, Duration::from_secs(2));
+        reset_rate_limit_gate();
     }
 
     #[tokio::test(start_paused = true)]
@@ -257,6 +354,36 @@ mod tests {
         );
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn agent_gate_does_not_block_workspace_owner_reads() {
+        let _serial = TEST_SERIAL.lock().await;
+        reset_rate_limit_gate();
+
+        activate_rate_limit_for("agent-pubkey", Some(60));
+        let start = Instant::now();
+        wait_for_rate_limit().await;
+
+        assert_eq!(
+            Instant::now(),
+            start,
+            "an agent's HTTP quota window must not park owner-authenticated thread reads"
+        );
+        reset_rate_limit_gate();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn same_principal_still_waits_for_its_gate() {
+        let _serial = TEST_SERIAL.lock().await;
+        reset_rate_limit_gate();
+
+        activate_rate_limit_for("agent-pubkey", Some(5));
+        let start = Instant::now();
+        wait_for_rate_limit_for("AGENT-PUBKEY").await;
+
+        assert_eq!(Instant::now() - start, Duration::from_secs(5));
+        reset_rate_limit_gate();
+    }
+
     /// A 429 on one admission-gated path withholds sends on a different path
     /// until the hinted window expires.
     ///
@@ -323,7 +450,7 @@ mod tests {
     /// then rechecks, finds the gate clear, and proceeds.
     ///
     /// This documents the contract: `sleep_until` is already scheduled against
-    /// A's expiry; the reset clears `GATE_EXPIRY` but cannot cancel an in-flight
+    /// A's expiry; the reset clears `GATE_EXPIRIES` but cannot cancel an in-flight
     /// sleep.  The recheck loop in `wait_for_rate_limit` then sees `None` and
     /// returns.  Net effect: the waiter observes at most one full window, which
     /// is the same bound as if the workspace had not changed.
