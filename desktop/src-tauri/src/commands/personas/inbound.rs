@@ -69,16 +69,8 @@ fn reconcile_inbound_persona_event_blocking(
     arrival_relay_url: String,
     app: AppHandle,
 ) -> Result<InboundReconcileOutcome, String> {
-    use crate::managed_agents::{
-        agent_events::managed_agent_content_from_event,
-        load_managed_agents, load_teams,
-        persona_events::persona_from_event,
-        retention::{open_retention_db, retain_inbound_event, InboundOutcome, RetainedEvent},
-        save_managed_agents, save_teams,
-        team_events::team_content_from_event,
-    };
+    use crate::managed_agents::persona_events::persona_from_event;
     use buzz_core_pkg::kind::{KIND_DELETION, KIND_MANAGED_AGENT, KIND_PERSONA, KIND_TEAM};
-    use nostr::JsonUtil;
 
     let state = app.state::<AppState>();
     let event = parse_verified_inbound_event(&event_json)?;
@@ -154,6 +146,37 @@ fn reconcile_inbound_persona_event_blocking(
         }
     }
 
+    apply_inbound_upsert_in_scope(&app, &scope, kind, d_tag, inbound_persona, &event)
+}
+
+/// Retain an inbound upsert into `scope`'s store and apply it to disk — the
+/// command core the blocking wrapper calls once it has resolved the arrival
+/// retention scope and cleared the §2.7 preflight.
+///
+/// Split out from [`reconcile_inbound_persona_event_blocking`] so a test can
+/// drive the real retain → apply → §2.8 convergence sequence against a mock
+/// app and a scope whose retention DB path it controls — crossing the exact
+/// `?` on the corrective re-retain rather than exercising the helper in
+/// isolation. Store I/O keys off the app's active scope; retention keys off
+/// the passed `scope`, exactly as in production.
+fn apply_inbound_upsert_in_scope<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    scope: &crate::managed_agents::retention::RetentionScope,
+    kind: u32,
+    d_tag: String,
+    inbound_persona: Option<AgentDefinition>,
+    event: &nostr::Event,
+) -> Result<InboundReconcileOutcome, String> {
+    use crate::managed_agents::{
+        agent_events::managed_agent_content_from_event,
+        load_managed_agents, load_teams,
+        retention::{open_retention_db, retain_inbound_event, InboundOutcome, RetainedEvent},
+        save_managed_agents, save_teams,
+        team_events::team_content_from_event,
+    };
+    use buzz_core_pkg::kind::{KIND_MANAGED_AGENT, KIND_PERSONA, KIND_TEAM};
+    use nostr::JsonUtil;
+
     let conn = open_retention_db(&scope.db_path)?;
     let outcome = retain_inbound_event(
         &conn,
@@ -174,31 +197,31 @@ fn reconcile_inbound_persona_event_blocking(
     let mut result = InboundReconcileOutcome::default();
     match kind {
         KIND_PERSONA => {
-            let mut personas = load_personas(&app)?;
+            let mut personas = load_personas(app)?;
             // `inbound_persona` is `Some` for KIND_PERSONA (set above).
             apply_inbound_persona(
                 &mut personas,
                 inbound_persona.expect("persona parsed above"),
             );
-            save_personas(&app, &personas)?;
+            save_personas(app, &personas)?;
         }
         KIND_TEAM => {
-            let mut teams = load_teams(&app)?;
-            apply_inbound_team(&mut teams, d_tag, team_content_from_event(&event)?);
-            save_teams(&app, &teams)?;
+            let mut teams = load_teams(app)?;
+            apply_inbound_team(&mut teams, d_tag, team_content_from_event(event)?);
+            save_teams(app, &teams)?;
         }
         KIND_MANAGED_AGENT => {
-            let mut agents = load_managed_agents(&app)?;
+            let mut agents = load_managed_agents(app)?;
             // §2.8 canonical linkage is resolved against the raw keyless
             // definition store (`library_ref` is not wire-carried).
-            let definitions = load_agent_definitions(&app)?;
+            let definitions = load_agent_definitions(app)?;
             let linkage = apply_inbound_managed_agent(
                 &mut agents,
                 &definitions,
                 &d_tag,
-                managed_agent_content_from_event(&event)?,
+                managed_agent_content_from_event(event)?,
             );
-            save_managed_agents(&app, &agents)?;
+            save_managed_agents(app, &agents)?;
 
             // §2.8 convergence: a frozen linkage means the retained head (the
             // inbound event, retained above) authored a library-owned or
@@ -226,7 +249,7 @@ fn reconcile_inbound_persona_event_blocking(
         }
         _ => unreachable!("kind gated above"),
     }
-    try_regenerate_nest(&app).ok();
+    try_regenerate_nest(app).ok();
 
     // Signal the live UI to refetch agents data — inbound relay events otherwise
     // land on disk silently, leaving the Agents tab stale until restart.

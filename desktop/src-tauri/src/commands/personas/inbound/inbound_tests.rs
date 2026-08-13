@@ -915,3 +915,9 @@ fn inbound_gate_accepts_validly_signed_event() {
     let parsed = parse_verified_inbound_event(&event.as_json()).unwrap();
     assert_eq!(parsed.pubkey, keys.public_key());
 }
+
+// The command-seam integration fixture (P2-I1) lives in a sibling file to keep
+// this module under the 1000-line file-size cap. Included here so it shares the
+// fixtures above via `use super::*`.
+#[path = "seam_tests.rs"]
+mod seam_tests;
