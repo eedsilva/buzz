@@ -264,10 +264,31 @@ pub async fn get_thread_replies(
         cap,
         thread_order.as_deref(),
         cursor.as_ref(),
+        true,
     );
 
     let events = query_relay(&state, &[serde_json::Value::Object(filter)]).await?;
-    thread_page::parse(events, &root_event_id)
+    match thread_page::parse(events, &root_event_id) {
+        Ok(page) => Ok(page),
+        Err(thread_page::ParseError::MissingBounds) => {
+            // Relays predating the bounds extension ignore the opt-in fields.
+            // Retry their historical oldest-first contract so Desktop releases
+            // remain safe during partial rollout and relay rollback.
+            let legacy_filter = build_thread_replies_filter(
+                &root_event_id,
+                channel_id.as_deref(),
+                depth_limit.unwrap_or(64),
+                cap,
+                None,
+                cursor.as_ref(),
+                false,
+            );
+            let legacy_events =
+                query_relay(&state, &[serde_json::Value::Object(legacy_filter)]).await?;
+            Ok(thread_page::parse_legacy(legacy_events, cap))
+        }
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 /// Build the relay `/query` filter for the server-side thread-subtree read.
@@ -292,6 +313,7 @@ fn build_thread_replies_filter(
     cap: u32,
     thread_order: Option<&str>,
     cursor: Option<&crate::models::ThreadCursor>,
+    include_bounds: bool,
 ) -> serde_json::Map<String, serde_json::Value> {
     let mut filter = serde_json::Map::new();
     filter.insert("#e".to_string(), serde_json::json!([root_event_id]));
@@ -300,11 +322,13 @@ fn build_thread_replies_filter(
     // defaults it to a deep-but-bounded value so nested replies aren't dropped.
     filter.insert("depth_limit".to_string(), serde_json::json!(depth_limit));
     filter.insert("limit".to_string(), serde_json::json!(cap));
-    // Opt into the relay's authoritative raw-scan bounds overlay. Older clients
-    // do not understand protocol events in this response and must not receive it.
-    filter.insert("thread_bounds".to_string(), serde_json::json!(true));
-    if matches!(thread_order, Some("newest")) {
-        filter.insert("thread_order".to_string(), serde_json::json!("newest"));
+    // Opt into authoritative raw-scan bounds only on the modern attempt.
+    // Legacy retries omit both extensions to preserve the old relay contract.
+    if include_bounds {
+        filter.insert("thread_bounds".to_string(), serde_json::json!(true));
+        if matches!(thread_order, Some("newest")) {
+            filter.insert("thread_order".to_string(), serde_json::json!("newest"));
+        }
     }
     if let Some(cid) = channel_id {
         filter.insert("#h".to_string(), serde_json::json!([cid]));
