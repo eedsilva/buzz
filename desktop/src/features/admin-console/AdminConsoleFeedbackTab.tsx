@@ -25,6 +25,7 @@ import {
 import {
   type AsyncState,
   type AttachmentMeta,
+  adminErrorMessage,
   CommunityGroupedList,
   DetailRow,
   ErrorMessage,
@@ -331,20 +332,18 @@ function FeedbackStatusControl({
   onStatusChanged: (newStatus: AdminFeedbackStatus) => void;
 }) {
   const [isWorking, setIsWorking] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
   const statuses: AdminFeedbackStatus[] = ["new", "reviewed", "archived"];
 
   const handleStatusChange = async (newStatus: AdminFeedbackStatus) => {
     if (newStatus === currentStatus) return;
-    setError(null);
     setIsWorking(true);
     try {
       await patchAdminFeedback(origin, feedbackId, newStatus);
       toast.success(`Feedback marked ${newStatus}`);
       onStatusChanged(newStatus);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      toast.error(adminErrorMessage(e));
     } finally {
       setIsWorking(false);
     }
@@ -375,7 +374,6 @@ function FeedbackStatusControl({
           </Button>
         ))}
       </div>
-      {error && <p className="text-xs text-destructive">{error}</p>}
     </div>
   );
 }

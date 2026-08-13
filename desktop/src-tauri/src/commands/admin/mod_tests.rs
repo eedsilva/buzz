@@ -153,6 +153,91 @@ fn parse_probe_rejects_non_object() {
     assert!(parse_probe("application/json", b"not json").is_none());
 }
 
+// ── authorized_principal / is_coherent_disabled invariants ────────────────
+//
+// Structural deserialisation (parse_probe) is necessary but not sufficient:
+// a 2xx body must also satisfy the full relay contract before its state is
+// trusted. These pin every branch of that invariant.
+
+/// Parse a body known to be structurally valid, then validate it.
+fn authorized(body: &str) -> Option<(ProbeRole, ProbeSource)> {
+    parse_probe("application/json", body.as_bytes())
+        .expect("structurally valid probe")
+        .authorized_principal()
+}
+
+#[test]
+fn authorized_principal_accepts_every_coherent_shape() {
+    // Operator (canStaff true) and moderator (canStaff false) across all three
+    // recognised sources — each must yield the typed principal.
+    let cases: &[(String, ProbeRole, ProbeSource)] = &[
+        (
+            probe_json("nip98", r#""operator""#, r#""config""#, true, true),
+            ProbeRole::Operator,
+            ProbeSource::Config,
+        ),
+        (
+            probe_json("nip98", r#""operator""#, r#""owner_fallback""#, true, true),
+            ProbeRole::Operator,
+            ProbeSource::OwnerFallback,
+        ),
+        (
+            probe_json("nip98", r#""moderator""#, r#""db""#, true, false),
+            ProbeRole::Moderator,
+            ProbeSource::Db,
+        ),
+    ];
+    for (body, role, source) in cases {
+        assert_eq!(authorized(body), Some((*role, *source)));
+    }
+}
+
+#[test]
+fn authorized_principal_rejects_every_incoherent_shape() {
+    // Structurally valid probe bodies the relay never emits under nip98;
+    // accepting any is fail-open. One invariant broken per row, top to bottom:
+    // wrong status, non-nip98 authMode, missing role, unknown role, missing
+    // source, unknown source, false canAct, operator lacking canStaff,
+    // moderator carrying canStaff.
+    let pj = probe_json;
+    let cases = [
+        pj("nip98", r#""operator""#, r#""config""#, true, true)
+            .replace(r#""status":"ok""#, r#""status":"error""#),
+        pj("token", "null", "null", false, false),
+        pj("nip98", "null", r#""config""#, true, true),
+        pj("nip98", r#""superuser""#, r#""config""#, true, true),
+        pj("nip98", r#""operator""#, "null", true, true),
+        pj("nip98", r#""operator""#, r#""ldap""#, true, true),
+        pj("nip98", r#""operator""#, r#""config""#, false, true),
+        pj("nip98", r#""operator""#, r#""config""#, true, false),
+        pj("nip98", r#""moderator""#, r#""config""#, true, true),
+    ];
+    for (i, body) in cases.iter().enumerate() {
+        assert_eq!(authorized(body), None, "row {i} must be rejected");
+    }
+}
+
+#[test]
+fn is_coherent_disabled_accepts_only_canonical_disabled() {
+    // Canonical disabled authorizes; nip98 mode and any disabled body claiming
+    // a role/source or a capability is incoherent and must be rejected.
+    let disabled = probe_json("disabled", "null", "null", false, false);
+    assert!(parse_probe("application/json", disabled.as_bytes())
+        .unwrap()
+        .is_coherent_disabled());
+
+    let incoherent = [
+        probe_json("nip98", r#""operator""#, r#""config""#, true, true),
+        probe_json("disabled", r#""operator""#, "null", false, false),
+        probe_json("disabled", "null", "null", true, false),
+    ];
+    for body in &incoherent {
+        assert!(!parse_probe("application/json", body.as_bytes())
+            .unwrap()
+            .is_coherent_disabled());
+    }
+}
+
 // ── Storage core through production code ─────────────────────────────────
 //
 // All tests call `get_admin_origin_core` / `set_admin_origin_core` directly
