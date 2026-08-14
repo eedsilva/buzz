@@ -192,6 +192,12 @@ fn sanitize_ogg_vorbis(body: &[u8]) -> Result<Vec<u8>, String> {
         return Err("invalid Vorbis headers".into());
     }
     packets[1].bytes = EMPTY_VORBIS_COMMENT.to_vec();
+    // Header packets always have position zero. Parsed packets may carry the
+    // unknown-position sentinel when another packet completed later on their
+    // source page; do not leak that sentinel into isolated header pages.
+    for packet in &mut packets[..3] {
+        packet.granule = 0;
+    }
     let mut out = Vec::new();
     let mut sequence = 0u32;
     for (index, packet) in packets[..3].iter().enumerate() {
@@ -544,33 +550,60 @@ mod tests {
         assert_eq!(output.windows(4).filter(|w| *w == b"OggS").count(), 4);
     }
 
+    fn relay_config() -> buzz_media_pkg::MediaConfig {
+        buzz_media_pkg::MediaConfig {
+            s3_endpoint: String::new(),
+            s3_access_key: String::new(),
+            s3_secret_key: String::new(),
+            s3_bucket: String::new(),
+            s3_region: "us-east-1".into(),
+            s3_addressing_style: buzz_media_pkg::S3AddressingStyle::Path,
+            max_image_bytes: 50 * 1024 * 1024,
+            max_gif_bytes: 10 * 1024 * 1024,
+            max_video_bytes: 524_288_000,
+            max_file_bytes: 104_857_600,
+            public_base_url: "http://localhost:3000/media".into(),
+            upload_records_enabled: false,
+            upload_ip_header: None,
+            upload_port_header: None,
+        }
+    }
+
     #[test]
     #[ignore = "requires ffmpeg-generated fixtures; run with BUZZ_AUDIO_FIXTURES"]
-    fn real_fixtures_emit_sanitized_outputs_for_external_oracles() {
+    fn real_fixture_sanitizer_output_is_relay_admissible() {
         let input_dir = std::path::PathBuf::from(
             std::env::var("BUZZ_AUDIO_FIXTURES").expect("BUZZ_AUDIO_FIXTURES input directory"),
         );
-        let output_dir = input_dir.join("sanitized");
-        std::fs::create_dir_all(&output_dir).unwrap();
-        for name in [
-            "tagged.mp3",
-            "mpeg2_22k.mp3",
-            "mpeg25_11k.mp3",
-            "tagged.wav",
-            "tagged.ogg",
-            "bigart.ogg",
-            "long.ogg",
+        let config = relay_config();
+        for (name, mime, ext) in [
+            ("tagged.mp3", "audio/mpeg", "mp3"),
+            ("mpeg2_22k.mp3", "audio/mpeg", "mp3"),
+            ("mpeg25_11k.mp3", "audio/mpeg", "mp3"),
+            ("tagged.wav", "audio/wav", "wav"),
+            ("tagged.ogg", "audio/ogg", "ogg"),
+            ("bigart.ogg", "audio/ogg", "ogg"),
+            ("long.ogg", "audio/ogg", "ogg"),
         ] {
-            let mime = if name.ends_with(".mp3") {
-                "audio/mpeg"
-            } else if name.ends_with(".wav") {
-                "audio/wav"
-            } else {
-                "audio/ogg"
-            };
             let body = std::fs::read(input_dir.join(name)).unwrap();
             let sanitized = sanitize_audio(body, mime).unwrap();
-            std::fs::write(output_dir.join(name), sanitized).unwrap();
+            assert_eq!(
+                buzz_media_pkg::validation::validate_file_content(&sanitized, &config).unwrap(),
+                (mime.to_string(), ext.to_string()),
+                "relay rejected sanitizer output for {name}",
+            );
+        }
+        // Negative control: acceptance above proves nothing if the relay also
+        // accepts the original metadata-bearing bytes.
+        for name in ["tagged.mp3", "tagged.wav", "tagged.ogg", "bigart.ogg"] {
+            let body = std::fs::read(input_dir.join(name)).unwrap();
+            let error = buzz_media_pkg::validation::validate_file_content(&body, &config)
+                .expect_err("relay accepted unstripped metadata-bearing bytes");
+            assert_eq!(
+                format!("{error:?}"),
+                "MetadataForbidden",
+                "relay rejected unstripped fixture {name} for the wrong reason",
+            );
         }
     }
 
