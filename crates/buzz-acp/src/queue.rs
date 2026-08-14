@@ -770,19 +770,26 @@ impl EventQueue {
     ///
     /// Also clears any `retry_after` throttle for the channel.
     ///
-    /// Returns the event IDs of dropped events so the caller can clean up
-    /// any reactions (👀) that were added at queue-push time.
+    /// Returns the visible event IDs that own lifecycle reactions for every
+    /// dropped queued or reserved event. Edit events therefore contribute
+    /// their original target IDs rather than their auxiliary kind:40003 IDs.
     pub fn drain_channel(&mut self, channel_id: Uuid) -> Vec<String> {
-        let ids = self
+        let mut ids: Vec<String> = self
             .queues
             .remove(&channel_id)
-            .map(|q| q.into_iter().map(|e| e.event.id.to_hex()).collect())
+            .map(|q| {
+                q.into_iter()
+                    .map(|e| reaction_target_id(&e.event))
+                    .collect()
+            })
             .unwrap_or_default();
+        if let Some(withheld) = self.withheld_native_steer.remove(&channel_id) {
+            ids.extend(withheld.into_iter().map(|e| reaction_target_id(&e.event)));
+        }
         self.retry_after.remove(&channel_id);
         self.retry_counts.remove(&channel_id);
         self.cancelled_batches.remove(&channel_id);
         self.cancel_reasons.remove(&channel_id);
-        self.withheld_native_steer.remove(&channel_id);
         self.sent_native_steers.remove(&channel_id);
         // If the prompt already completed behind a sent-steer acknowledgement
         // fence, removing the reservation settles that fence immediately.
@@ -4265,6 +4272,25 @@ mod tests {
 
         let drained = q.drain_channel(ch);
         assert_eq!(drained.len(), 2);
+        assert_eq!(pending_count(&q), 0);
+    }
+
+    #[test]
+    fn drain_channel_returns_visible_reaction_targets_for_queued_and_reserved_edits() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        let queued_target = "ab".repeat(32);
+        let reserved_target = "cd".repeat(32);
+
+        q.push(make_edit_queued_created_at(ch, &queued_target, 100));
+        let reserved = make_edit_queued_created_at(ch, &reserved_target, 101);
+        let reserved_id = reserved.event.id.to_hex();
+        q.push(reserved);
+        assert!(q.mark_native_steer_pending(ch, &reserved_id));
+
+        let drained = q.drain_channel(ch);
+        assert_eq!(drained, vec![queued_target, reserved_target]);
+        assert!(!q.has_native_steer_reservations(ch));
         assert_eq!(pending_count(&q), 0);
     }
 
