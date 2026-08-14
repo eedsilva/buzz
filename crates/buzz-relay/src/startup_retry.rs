@@ -328,9 +328,9 @@ mod tests {
         // as permanent would prevent startup from surviving DNS convergence,
         // connection loss, or Redis loading its dataset.
         for kind in [
-            redis::ErrorKind::IoError,
-            redis::ErrorKind::BusyLoadingError,
-            redis::ErrorKind::TryAgain,
+            redis::ErrorKind::Io,
+            redis::ErrorKind::Server(redis::ServerErrorKind::BusyLoading),
+            redis::ErrorKind::Server(redis::ServerErrorKind::TryAgain),
         ] {
             let error = redis::RedisError::from((kind, "retryable Redis error"));
             assert!(matches!(
@@ -347,8 +347,8 @@ mod tests {
         // an operator or code change to recover.
         for kind in [
             redis::ErrorKind::AuthenticationFailed,
-            redis::ErrorKind::ResponseError,
-            redis::ErrorKind::TypeError,
+            redis::ErrorKind::Server(redis::ServerErrorKind::ResponseError),
+            redis::ErrorKind::UnexpectedReturnType,
         ] {
             let error = redis::RedisError::from((kind, "non-retryable Redis error"));
             assert!(matches!(
