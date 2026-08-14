@@ -26,6 +26,8 @@ use buzz_relay::telemetry;
 use buzz_workflow::WorkflowEngine;
 use tokio_util::sync::CancellationToken;
 
+mod startup_retry;
+
 fn buzz_auto_migrate_enabled(value: Option<&str>) -> bool {
     value.map(str::trim).is_some_and(|value| {
         matches!(
