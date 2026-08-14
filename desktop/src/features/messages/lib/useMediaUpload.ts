@@ -10,6 +10,7 @@ import {
   isAgentSnapshotPngFilename,
   withAgentSnapshotAvatarPreview,
 } from "./agentSnapshotAttachmentPreview";
+import { useAgentSnapshotAvatarRecovery } from "./useAgentSnapshotAvatarRecovery";
 import type { QueuedMediaAttachment } from "./backgroundMediaUploadStore";
 import { applyImetaUpdate, compactImetaSlots } from "./imetaSlots";
 import { useFilePicker } from "./useFilePicker";
@@ -258,6 +259,7 @@ export function useMediaUpload({
 
   const pendingImetaRef = React.useRef(pendingImeta);
   pendingImetaRef.current = pendingImeta;
+  useAgentSnapshotAvatarRecovery(pendingImeta, setImetaSlots);
 
   /**
    * Pre-edit originals of annotated attachments, keyed by the annotated
