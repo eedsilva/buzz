@@ -131,7 +131,8 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        retry_delay, retry_startup, StartupAttemptError, StartupErrorCategory, StartupRetryPolicy,
+        classify_sqlx_error, retry_delay, retry_startup, RetryDisposition, StartupAttemptError,
+        StartupErrorCategory, StartupRetryPolicy,
     };
 
     fn test_policy(deadline: Duration) -> StartupRetryPolicy {
@@ -244,5 +245,55 @@ mod tests {
             retry_delay(&policy, 8, Duration::from_millis(250)),
             Duration::from_millis(5_250),
         );
+    }
+
+    #[test]
+    fn sqlx_io_errors_are_transient() {
+        // A classifier that treats any transport failure as permanent would
+        // prevent retrying DNS convergence, refusal, timeout, and reset.
+        for kind in [
+            std::io::ErrorKind::NotFound,
+            std::io::ErrorKind::ConnectionRefused,
+            std::io::ErrorKind::TimedOut,
+            std::io::ErrorKind::ConnectionReset,
+        ] {
+            let error = sqlx::Error::Io(std::io::Error::from(kind));
+            assert!(matches!(
+                classify_sqlx_error(&error),
+                RetryDisposition::Transient
+            ));
+        }
+    }
+
+    #[test]
+    fn sqlx_pool_timeout_is_transient() {
+        // A classifier that marks pool exhaustion permanent would skip a
+        // recoverable startup retry.
+        assert!(matches!(
+            classify_sqlx_error(&sqlx::Error::PoolTimedOut),
+            RetryDisposition::Transient
+        ));
+    }
+
+    #[test]
+    fn sqlx_configuration_error_is_permanent() {
+        // A classifier that retries a malformed connection string would delay
+        // a startup that cannot recover without configuration changes.
+        let error = sqlx::Error::Configuration(Box::new(std::io::Error::other("invalid url")));
+        assert!(matches!(
+            classify_sqlx_error(&error),
+            RetryDisposition::Permanent
+        ));
+    }
+
+    #[test]
+    fn sqlx_protocol_error_is_permanent() {
+        // A classifier that retries protocol failures would hide an invalid
+        // database interaction rather than failing startup immediately.
+        let error = sqlx::Error::Protocol("unexpected message".to_owned());
+        assert!(matches!(
+            classify_sqlx_error(&error),
+            RetryDisposition::Permanent
+        ));
     }
 }
