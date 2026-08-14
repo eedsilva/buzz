@@ -1,9 +1,7 @@
 import 'dart:async';
 import 'dart:math';
-
 import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme_provider.dart';
 import '../../shared/utils/string_utils.dart';
@@ -26,12 +24,9 @@ const _participatedRootIdsPrefix = 'buzz-thread-participation.v1';
 const _authoredRootIdsPrefix = 'buzz-thread-authored.v1';
 
 /// Loads the user's channel list from the relay over WebSocket.
-///
-/// Two-step query:
 ///   1. Fetch kind:39002 membership events tagged `#p:<my-pubkey>` to find
 ///      the channel ids I'm a member of.
 ///   2. Fetch the corresponding kind:39000 channel metadata events.
-///
 /// Live updates are layered on top via per-channel subscriptions on the
 /// `#h` tag for any of the visible channel event kinds — incoming events
 /// bump `lastMessageAt` for that channel.
@@ -566,26 +561,30 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
             final attempt = Object();
             var terminallyClosed = false;
             _pendingSubscriptionCancellations[channelId] = cancellation;
-            final unsubscribe = await session.subscribeWhenReady(
-              NostrFilter(
-                kinds: EventKind.channelEventKinds,
-                tags: {
-                  '#h': [channelId],
+            final unsubscribe = await subscribeWhenReadyWithTimeout(
+              (cancelled) => session.subscribeWhenReady(
+                NostrFilter(
+                  kinds: EventKind.channelEventKinds,
+                  tags: {
+                    '#h': [channelId],
+                  },
+                  limit: 0,
+                ),
+                _handleLiveEvent,
+                onClosed: (_) {
+                  terminallyClosed = true;
+                  final current = _liveSubscriptionsByChannel[channelId];
+                  if (current?.attempt != attempt) return;
+                  _liveSubscriptionsByChannel.remove(channelId);
+                  _terminallyClosedChannelIds.add(channelId);
+                  _unreadCatchUpChannelIds = Set.unmodifiable(
+                    _unreadCatchUpChannelIds.difference({channelId}),
+                  );
                 },
-                limit: 0,
+                cancelled: cancelled,
               ),
-              _handleLiveEvent,
-              onClosed: (_) {
-                terminallyClosed = true;
-                final current = _liveSubscriptionsByChannel[channelId];
-                if (current?.attempt != attempt) return;
-                _liveSubscriptionsByChannel.remove(channelId);
-                _terminallyClosedChannelIds.add(channelId);
-                _unreadCatchUpChannelIds = Set.unmodifiable(
-                  _unreadCatchUpChannelIds.difference({channelId}),
-                );
-              },
-              cancelled: cancellation.future,
+              cancellation,
+              timeout: ref.read(channelsLiveSubscriptionReadyTimeoutProvider),
             );
             _pendingSubscriptionCancellations.remove(channelId);
             if (terminallyClosed) {
@@ -613,8 +612,8 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
               attempt: attempt,
               unsubscribe: unsubscribe,
             );
-          } on RelaySubscriptionCancelledException {
-            // The desired channel set, relay, or provider lifetime changed.
+          } on TimeoutException catch (_) {
+          } on RelaySubscriptionCancelledException catch (_) {
           } catch (error) {
             debugPrint(
               '[ChannelsNotifier] live subscription failed for $channelId: $error',
@@ -994,6 +993,9 @@ final channelsProvider = AsyncNotifierProvider<ChannelsNotifier, List<Channel>>(
   ChannelsNotifier.new,
 );
 
+final channelsLiveSubscriptionReadyTimeoutProvider = Provider<Duration>(
+  (_) => liveSubscriptionReadyTimeout,
+);
 final channelsLiveSubscriptionDelayProvider = Provider<TaskDelay>(
   (_) => defaultTaskDelay,
 );

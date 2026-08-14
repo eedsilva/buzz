@@ -762,6 +762,8 @@ class RelaySessionNotifier extends Notifier<SessionState> {
             ? fallbackMs
             : _rateLimitGate.remainingMs(),
       );
+    } else if (closedClass == RelayClosedClass.capacity) {
+      delayMs = max(backoffMs, RelayRateLimitGate.defaultRetrySeconds * 1000);
     }
 
     liveSub.closedRetryAttempt = attempt + 1;

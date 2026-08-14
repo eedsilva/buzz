@@ -22,7 +22,7 @@ use crate::connection::{AuthState, ConnectionState};
 use crate::protocol::RelayMessage;
 use crate::state::AppState;
 
-const MAX_SUBSCRIPTIONS: usize = 1024;
+const MAX_SUBSCRIPTIONS: usize = 2048;
 
 /// Maximum `query_events` calls in flight per multi-filter REQ / bridge query.
 ///

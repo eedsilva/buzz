@@ -11,6 +11,7 @@ import 'unread_badge/should_notify_for_event.dart';
 
 const lastMessageQueryBatchSize = 100;
 const lastMessageQueryTotalTimeout = Duration(seconds: 8);
+const liveSubscriptionReadyTimeout = Duration(seconds: 8);
 
 Future<List<NostrEvent>> fetchChannelHistoryBatch(
   RelaySessionNotifier session,
@@ -177,6 +178,31 @@ Map<String, int> resolveChannelLastMessages(
 
 typedef TaskDelay = Future<void> Function(Duration duration);
 typedef TaskErrorHandler = void Function(Object error);
+typedef CancellationTimer =
+    Timer Function(Duration duration, void Function() callback);
+typedef PendingSubscription =
+    Future<void Function()> Function(Future<void> cancelled);
+
+Future<void Function()> subscribeWhenReadyWithTimeout(
+  PendingSubscription subscribe,
+  Completer<void> cancellation, {
+  Duration timeout = liveSubscriptionReadyTimeout,
+  CancellationTimer timerFactory = Timer.new,
+}) async {
+  var timedOut = false;
+  final timer = timerFactory(timeout, () {
+    timedOut = true;
+    if (!cancellation.isCompleted) cancellation.complete();
+  });
+  try {
+    return await subscribe(cancellation.future);
+  } on RelaySubscriptionCancelledException {
+    if (timedOut) throw TimeoutException('Relay EOSE timed out after $timeout');
+    rethrow;
+  } finally {
+    timer.cancel();
+  }
+}
 
 Future<void> runPacedTasks(
   List<Future<void> Function()> tasks, {
