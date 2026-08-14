@@ -30,6 +30,26 @@ pub(crate) fn classify_db_error(error: &buzz_db::DbError) -> RetryDisposition {
     }
 }
 
+pub(crate) fn classify_redis_error(error: &redis::RedisError) -> RetryDisposition {
+    match error.kind() {
+        redis::ErrorKind::Io
+        | redis::ErrorKind::Server(
+            redis::ServerErrorKind::BusyLoading | redis::ServerErrorKind::TryAgain,
+        ) => RetryDisposition::Transient,
+        _ => RetryDisposition::Permanent,
+    }
+}
+
+pub(crate) fn classify_redis_pool_error(
+    error: &deadpool_redis::PoolError,
+) -> RetryDisposition {
+    match error {
+        deadpool_redis::PoolError::Timeout(_) => RetryDisposition::Transient,
+        deadpool_redis::PoolError::Backend(error) => classify_redis_error(error),
+        _ => RetryDisposition::Permanent,
+    }
+}
+
 pub(crate) struct StartupRetryPolicy {
     pub(crate) deadline: Duration,
     pub(crate) initial_delay: Duration,
@@ -84,6 +104,51 @@ impl StartupAttemptError {
 
     pub(crate) fn permanent(error: anyhow::Error) -> Self {
         Self::Permanent { error }
+    }
+}
+
+pub(crate) async fn verify_redis_startup(
+    pool: &deadpool_redis::Pool,
+) -> Result<(), StartupAttemptError> {
+    let mut connection = pool
+        .get()
+        .await
+        .map_err(redis_pool_startup_attempt_error)?;
+    let response = redis::cmd("PING")
+        .query_async::<String>(&mut connection)
+        .await
+        .map_err(redis_startup_attempt_error)?;
+
+    if response == "PONG" {
+        Ok(())
+    } else {
+        Err(StartupAttemptError::permanent(anyhow::anyhow!(
+            "Redis PING returned an unexpected response"
+        )))
+    }
+}
+
+fn redis_pool_startup_attempt_error(error: deadpool_redis::PoolError) -> StartupAttemptError {
+    let category = match &error {
+        deadpool_redis::PoolError::Timeout(_) => StartupErrorCategory::Timeout,
+        _ => StartupErrorCategory::BackendUnavailable,
+    };
+    let disposition = classify_redis_pool_error(&error);
+    let error = anyhow::anyhow!("Redis pool connection attempt failed");
+    match disposition {
+        RetryDisposition::Transient => StartupAttemptError::transient(category, error),
+        RetryDisposition::Permanent => StartupAttemptError::permanent(error),
+    }
+}
+
+fn redis_startup_attempt_error(error: redis::RedisError) -> StartupAttemptError {
+    let disposition = classify_redis_error(&error);
+    let error = anyhow::anyhow!("Redis PING failed");
+    match disposition {
+        RetryDisposition::Transient => {
+            StartupAttemptError::transient(StartupErrorCategory::BackendUnavailable, error)
+        }
+        RetryDisposition::Permanent => StartupAttemptError::permanent(error),
     }
 }
 

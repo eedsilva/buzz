@@ -29,8 +29,8 @@ use tokio_util::sync::CancellationToken;
 mod startup_retry;
 
 use startup_retry::{
-    classify_db_error, classify_sqlx_error, retry_startup, RetryDisposition, StartupAttemptError,
-    StartupErrorCategory, StartupRetryPolicy,
+    classify_db_error, classify_sqlx_error, retry_startup, verify_redis_startup, RetryDisposition,
+    StartupAttemptError, StartupErrorCategory, StartupRetryPolicy,
 };
 
 fn startup_attempt_error_from_db(error: DbError) -> StartupAttemptError {
@@ -421,13 +421,21 @@ async fn main() -> anyhow::Result<()> {
         let mut cfg = deadpool_redis::Config::from_url(&config.redis_url);
         cfg.pool = Some(deadpool_redis::PoolConfig::new(config.redis_pool_size));
         cfg.create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .map_err(|e| anyhow::anyhow!("Redis pool creation failed: {e}"))?
+            .map_err(|_| anyhow::anyhow!("Redis pool creation failed"))?
     };
+    retry_startup("redis", StartupRetryPolicy::production(), || {
+        verify_redis_startup(&redis_pool)
+    })
+    .await
+    .map_err(|e| {
+        error!("Failed to connect to Redis: {e}");
+        e
+    })?;
     let redis_health_pool = redis_pool.clone(); // cheap Arc clone — shared with readiness handler
     let pubsub = Arc::new(
         PubSubManager::new(&config.redis_url, redis_pool)
             .await
-            .map_err(|e| anyhow::anyhow!("PubSub init failed: {e}"))?,
+            .map_err(|_| anyhow::anyhow!("PubSub init failed"))?,
     );
     info!("Redis pub/sub connected");
 
