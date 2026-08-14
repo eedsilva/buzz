@@ -1865,7 +1865,7 @@ test("an older agent message opens the same persona instance as the Agents libra
   await page.goto("/");
 
   await page.getByTestId("open-agents-view").click();
-  await page.getByTestId(`persona-agent-row-${personaId}`).click();
+  await page.getByTestId(`managed-agent-${currentPubkey}`).click();
   await expect(
     page.getByTestId("user-profile-agent-primary-action"),
   ).toHaveAttribute("aria-label", "Stop");
