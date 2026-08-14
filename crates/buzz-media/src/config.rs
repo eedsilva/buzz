@@ -41,6 +41,10 @@ fn default_max_file_bytes() -> u64 {
     104_857_600 // 100 MB
 }
 
+fn default_max_audio_bytes() -> u64 {
+    26_214_400 // 25 MB
+}
+
 fn default_s3_region() -> String {
     "us-east-1".to_string()
 }
@@ -77,6 +81,9 @@ pub struct MediaConfig {
     /// Maximum upload size for generic (non-image, non-video) files (bytes). Default: 100 MB.
     #[serde(default = "default_max_file_bytes")]
     pub max_file_bytes: u64,
+    /// Maximum upload size for MP3, WAV, and Ogg audio files (bytes). Default: 25 MB.
+    #[serde(default = "default_max_audio_bytes")]
+    pub max_audio_bytes: u64,
     /// Public base URL for media URLs in BlobDescriptor (must include `/media` path).
     pub public_base_url: String,
     /// Whether to write per-upload-event records under `_uploads/`
@@ -123,6 +130,9 @@ impl MediaConfig {
         }
         if self.max_file_bytes == 0 {
             return Err("max_file_bytes must be > 0".to_string());
+        }
+        if self.max_audio_bytes == 0 || self.max_audio_bytes > self.max_file_bytes {
+            return Err("max_audio_bytes must be > 0 and <= max_file_bytes".to_string());
         }
         // Fail startup on incoherent collection config instead of silently
         // recording nothing — an operator who set an IP header believes they
@@ -174,6 +184,7 @@ mod tests {
             max_gif_bytes: 1,
             max_video_bytes: 1,
             max_file_bytes: 1,
+            max_audio_bytes: 1,
             public_base_url: "http://localhost:3000/media".to_string(),
             upload_records_enabled: false,
             upload_ip_header: None,
@@ -208,6 +219,22 @@ mod tests {
                 "unexpected error for {invalid:?}: {error}"
             );
         }
+    }
+
+    #[test]
+    fn audio_cap_must_be_nonzero_and_within_file_cap() {
+        let mut cfg = valid_config();
+        cfg.max_audio_bytes = 0;
+        assert_eq!(
+            cfg.validate().unwrap_err(),
+            "max_audio_bytes must be > 0 and <= max_file_bytes"
+        );
+
+        cfg.max_audio_bytes = cfg.max_file_bytes + 1;
+        assert_eq!(
+            cfg.validate().unwrap_err(),
+            "max_audio_bytes must be > 0 and <= max_file_bytes"
+        );
     }
 
     #[test]

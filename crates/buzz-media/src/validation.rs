@@ -295,6 +295,8 @@ fn validate_wav_metadata_free(bytes: &[u8]) -> Result<(), MediaError> {
 }
 
 fn ogg_crc(bytes: &[u8]) -> u32 {
+    // This bitwise form is intentionally simple. Audio uploads are capped at
+    // 25 MB before this walk; re-price the loop before raising that ceiling.
     let mut crc = 0u32;
     for byte in bytes {
         crc ^= (*byte as u32) << 24;
@@ -399,11 +401,16 @@ fn validate_ogg_metadata_free(bytes: &[u8]) -> Result<(), MediaError> {
         .ok_or(MediaError::MetadataForbidden)
 }
 
-fn validate_audio_content(
-    bytes: &[u8],
-) -> Option<Result<(&'static str, &'static str), MediaError>> {
+#[derive(Clone, Copy)]
+enum AudioKind {
+    Mp3,
+    Wav,
+    Ogg,
+}
+
+fn classify_audio(bytes: &[u8]) -> Option<Result<AudioKind, MediaError>> {
     if bytes.starts_with(b"RIFF") {
-        return Some(validate_wav_metadata_free(bytes).map(|()| ("audio/wav", "wav")));
+        return Some(Ok(AudioKind::Wav));
     }
     if bytes.starts_with(b"OggS") {
         if infer::get(bytes).is_some_and(|kind| kind.mime_type() == "audio/opus") {
@@ -411,15 +418,26 @@ fn validate_audio_content(
                 "audio/opus".to_string(),
             )));
         }
-        return Some(validate_ogg_metadata_free(bytes).map(|()| ("audio/ogg", "ogg")));
+        return Some(Ok(AudioKind::Ogg));
     }
     if bytes.starts_with(b"ID3") || bytes.starts_with(b"TAG") || bytes.starts_with(b"APETAGEX") {
         return Some(Err(MediaError::MetadataForbidden));
     }
     if bytes.len() >= 2 && bytes[0] == 0xff && bytes[1] & 0xe0 == 0xe0 {
-        return Some(validate_mp3_metadata_free(bytes).map(|()| ("audio/mpeg", "mp3")));
+        return Some(Ok(AudioKind::Mp3));
     }
     None
+}
+
+fn validate_audio_content(
+    bytes: &[u8],
+    kind: AudioKind,
+) -> Result<(&'static str, &'static str), MediaError> {
+    match kind {
+        AudioKind::Mp3 => validate_mp3_metadata_free(bytes).map(|()| ("audio/mpeg", "mp3")),
+        AudioKind::Wav => validate_wav_metadata_free(bytes).map(|()| ("audio/wav", "wav")),
+        AudioKind::Ogg => validate_ogg_metadata_free(bytes).map(|()| ("audio/ogg", "ogg")),
+    }
 }
 
 /// Validate uploaded bytes for the **generic file or audio** upload path.
@@ -447,8 +465,17 @@ pub fn validate_file_content(
         });
     }
 
-    if let Some(result) = validate_audio_content(bytes) {
-        return result.map(|(mime, ext)| (mime.to_string(), ext.to_string()));
+    if let Some(kind) = classify_audio(bytes) {
+        let kind = kind?;
+        // Bound container walks (notably bitwise Ogg CRC) before they begin.
+        if bytes.len() as u64 > config.max_audio_bytes {
+            return Err(MediaError::FileTooLarge {
+                size: bytes.len() as u64,
+                max: config.max_audio_bytes,
+            });
+        }
+        return validate_audio_content(bytes, kind)
+            .map(|(mime, ext)| (mime.to_string(), ext.to_string()));
     }
 
     // ISO-BMFF permits arbitrary major brands, so `infer` cannot enumerate all
@@ -1239,6 +1266,7 @@ mod tests {
             max_gif_bytes: 10 * 1024 * 1024,
             max_video_bytes: 524_288_000,
             max_file_bytes: 104_857_600,
+            max_audio_bytes: 104_857_600,
             public_base_url: String::new(),
             upload_records_enabled: false,
             upload_ip_header: None,
@@ -1875,6 +1903,22 @@ mod tests {
                     .unwrap_or_else(|error| panic!("{name}: {error}")),
                 (mime.to_string(), ext.to_string())
             );
+        }
+    }
+
+    #[test]
+    fn test_audio_cap_precedes_container_walks() {
+        let mut config = test_config();
+        config.max_audio_bytes = 4;
+        for bytes in [
+            b"OggSoversized malformed container".as_slice(),
+            b"RIFFoversized malformed container".as_slice(),
+            b"\xff\xfboversized malformed frames".as_slice(),
+        ] {
+            assert!(matches!(
+                validate_file_content(bytes, &config),
+                Err(MediaError::FileTooLarge { size, max: 4 }) if size == bytes.len() as u64
+            ));
         }
     }
 
