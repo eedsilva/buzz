@@ -221,8 +221,8 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        classify_sqlx_error, retry_delay, retry_startup, RetryDisposition, StartupAttemptError,
-        StartupErrorCategory, StartupRetryPolicy,
+        classify_redis_error, classify_sqlx_error, retry_delay, retry_startup, RetryDisposition,
+        StartupAttemptError, StartupErrorCategory, StartupRetryPolicy,
     };
 
     fn test_policy(deadline: Duration) -> StartupRetryPolicy {
