@@ -3397,6 +3397,7 @@ impl Db {
     /// parameter admits community-global rows alongside channel rows, so no
     /// single channel's fence floor can prove completeness — the covered arm
     /// is structurally unavailable, not merely unchosen.
+    #[allow(clippy::too_many_arguments)]
     #[datastore_span(name = "query_feed_mentions_routed", system = "postgresql")]
     pub async fn query_feed_mentions_routed(
         &self,
@@ -3482,6 +3483,7 @@ impl Db {
     /// [`Db::query_feed_needs_action`] with replica routing — BOUNDED arm
     /// only; see [`Db::query_feed_mentions_routed`] for why the covered arm
     /// is structurally unavailable to feed queries.
+    #[allow(clippy::too_many_arguments)]
     #[datastore_span(name = "query_feed_needs_action_routed", system = "postgresql")]
     pub async fn query_feed_needs_action_routed(
         &self,
