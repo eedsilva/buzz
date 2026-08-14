@@ -832,6 +832,23 @@ async fn handle_workflow_def(
     })
 }
 
+async fn caller_controls_workflow(
+    state: &Arc<AppState>,
+    community_id: CommunityId,
+    workflow_owner: &[u8],
+    caller: &[u8],
+) -> Result<bool, IngestError> {
+    if workflow_owner == caller {
+        return Ok(true);
+    }
+
+    state
+        .db
+        .is_agent_owner(community_id, workflow_owner, caller)
+        .await
+        .map_err(|e| IngestError::Internal(format!("error: workflow owner check: {e}")))
+}
+
 async fn handle_workflow_trigger(
     tenant: &TenantContext,
     state: &Arc<AppState>,
@@ -860,10 +877,11 @@ async fn handle_workflow_trigger(
         .await
         .map_err(|_| IngestError::Rejected("invalid: workflow not found".into()))?;
 
-    // 3. Manual triggers execute with the workflow owner's authority, so only
-    // the owner may start them. Channel membership alone is insufficient: a
+    // 3. Manual triggers execute with the workflow owner's authority. Permit
+    // that principal and, when the owner is a managed agent, its immutable
+    // NIP-OA human owner. Channel membership alone remains insufficient: a
     // member could otherwise invoke another user's webhook or message actions.
-    if workflow.owner_pubkey != self_bytes {
+    if !caller_controls_workflow(state, community_id, &workflow.owner_pubkey, &self_bytes).await? {
         return Err(IngestError::Rejected(
             "forbidden: not authorized to trigger this workflow".into(),
         ));
