@@ -5,6 +5,31 @@ use std::time::Duration;
 use anyhow::Context;
 use tokio::time::Instant;
 
+pub(crate) enum RetryDisposition {
+    Transient,
+    Permanent,
+}
+
+pub(crate) fn classify_sqlx_error(error: &sqlx::Error) -> RetryDisposition {
+    match error {
+        sqlx::Error::Io(_) => RetryDisposition::Transient,
+        sqlx::Error::PoolTimedOut => RetryDisposition::Transient,
+        sqlx::Error::Configuration(_)
+        | sqlx::Error::Protocol(_)
+        | sqlx::Error::Database(_)
+        | sqlx::Error::Migrate(_) => RetryDisposition::Permanent,
+        _ => RetryDisposition::Permanent,
+    }
+}
+
+pub(crate) fn classify_db_error(error: &buzz_db::DbError) -> RetryDisposition {
+    match error {
+        buzz_db::DbError::Sqlx(error) => classify_sqlx_error(error),
+        buzz_db::DbError::Migrate(_) => RetryDisposition::Permanent,
+        _ => RetryDisposition::Permanent,
+    }
+}
+
 pub(crate) struct StartupRetryPolicy {
     pub(crate) deadline: Duration,
     pub(crate) initial_delay: Duration,

@@ -13,7 +13,7 @@ use uuid::Uuid;
 use buzz_audit::AuditService;
 use buzz_auth::AuthService;
 use buzz_core::CommunityId;
-use buzz_db::{Db, DbConfig};
+use buzz_db::{Db, DbConfig, DbError};
 use buzz_pubsub::PubSubManager;
 use buzz_search::SearchService;
 
@@ -27,6 +27,48 @@ use buzz_workflow::WorkflowEngine;
 use tokio_util::sync::CancellationToken;
 
 mod startup_retry;
+
+use startup_retry::{
+    classify_db_error, classify_sqlx_error, retry_startup, RetryDisposition, StartupAttemptError,
+    StartupErrorCategory, StartupRetryPolicy,
+};
+
+fn startup_attempt_error_from_db(error: DbError) -> StartupAttemptError {
+    match classify_db_error(&error) {
+        RetryDisposition::Transient => {
+            let category = match &error {
+                DbError::Sqlx(error) => startup_error_category(error),
+                _ => StartupErrorCategory::BackendUnavailable,
+            };
+            StartupAttemptError::transient(category, anyhow::Error::new(error))
+        }
+        RetryDisposition::Permanent => StartupAttemptError::permanent(anyhow::Error::new(error)),
+    }
+}
+
+fn startup_attempt_error_from_sqlx(error: sqlx::Error) -> StartupAttemptError {
+    match classify_sqlx_error(&error) {
+        RetryDisposition::Transient => StartupAttemptError::transient(
+            startup_error_category(&error),
+            anyhow::Error::new(error),
+        ),
+        RetryDisposition::Permanent => StartupAttemptError::permanent(anyhow::Error::new(error)),
+    }
+}
+
+fn startup_error_category(error: &sqlx::Error) -> StartupErrorCategory {
+    match error {
+        sqlx::Error::Io(error) => match error.kind() {
+            std::io::ErrorKind::NotFound => StartupErrorCategory::Dns,
+            std::io::ErrorKind::ConnectionRefused => StartupErrorCategory::ConnectionRefused,
+            std::io::ErrorKind::TimedOut => StartupErrorCategory::Timeout,
+            std::io::ErrorKind::ConnectionReset => StartupErrorCategory::BackendUnavailable,
+            _ => StartupErrorCategory::BackendUnavailable,
+        },
+        sqlx::Error::PoolTimedOut => StartupErrorCategory::Timeout,
+        _ => StartupErrorCategory::BackendUnavailable,
+    }
+}
 
 fn buzz_auto_migrate_enabled(value: Option<&str>) -> bool {
     value.map(str::trim).is_some_and(|value| {
@@ -173,9 +215,15 @@ async fn main() -> anyhow::Result<()> {
         read_max_connections: config.db_read_pool_size,
         ..DbConfig::default()
     };
-    let db = Db::new(&db_config).await.map_err(|e| {
+    let db = retry_startup(
+        "postgres-writer",
+        StartupRetryPolicy::production(),
+        || async { Db::new(&db_config).await.map_err(startup_attempt_error_from_db) },
+    )
+    .await
+    .map_err(|e| {
         error!("Failed to connect to Postgres: {e}");
-        anyhow::anyhow!("DB connection failed: {e}")
+        e
     })?;
     if db.has_read_pool() {
         info!("Postgres connected (writer + lazy read replica pool)");
@@ -349,12 +397,19 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let audit = if config.audit_enabled {
-        let audit_pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(5)
-            .min_connections(1)
-            .connect(&config.database_url)
-            .await
-            .map_err(|e| anyhow::anyhow!("Audit DB connection failed: {e}"))?;
+        let audit_pool = retry_startup(
+            "postgres-audit",
+            StartupRetryPolicy::production(),
+            || async {
+                sqlx::postgres::PgPoolOptions::new()
+                    .max_connections(5)
+                    .min_connections(1)
+                    .connect(&config.database_url)
+                    .await
+                    .map_err(startup_attempt_error_from_sqlx)
+            },
+        )
+        .await?;
         info!("Audit service ready");
         Some(AuditService::new(audit_pool))
     } else {
@@ -405,10 +460,17 @@ async fn main() -> anyhow::Result<()> {
         .read_database_url
         .as_deref()
         .unwrap_or(&config.database_url);
-    let search_pool = sqlx::postgres::PgPoolOptions::new()
-        .connect(search_db_url)
-        .await
-        .map_err(|e| anyhow::anyhow!("Search DB connection failed: {e}"))?;
+    let search_pool = retry_startup(
+        "postgres-search",
+        StartupRetryPolicy::production(),
+        || async {
+            sqlx::postgres::PgPoolOptions::new()
+                .connect(search_db_url)
+                .await
+                .map_err(startup_attempt_error_from_sqlx)
+        },
+    )
+    .await?;
     let search = SearchService::new(search_pool);
     info!(
         replica = config.read_database_url.is_some(),
