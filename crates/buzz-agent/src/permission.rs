@@ -519,6 +519,74 @@ mod tests {
         assert_eq!(broker.available_permits(), 4);
     }
 
+    // ── Malformed response frames deny (Carl's review) ────────────────────────
+
+    /// Route Carl's frame through the real `classify` → `deliver` path against a
+    /// live waiter and assert the tool is denied. Delivers on the exact id the
+    /// broker minted, so the only reason the waiter denies is that `classify`
+    /// refused to forward the ambiguous/malformed `result`. `provider_id`
+    /// carries which shape is under test so a failure names the mutant.
+    async fn assert_malformed_frame_denies(provider_id: &str, frame: Value) {
+        let broker = Arc::new(PermissionBroker::new(4, LONG));
+        let (tx, mut rx) = mpsc::channel(8);
+        let (_cancel_tx, mut cancel_rx) = watch::channel(false);
+
+        let b = Arc::clone(&broker);
+        let call = tool_call();
+        let task = tokio::spawn(async move {
+            b.request_permission(&tx, 2, "ses_a", &call, &mut cancel_rx)
+                .await
+        });
+
+        let id = next_request_id(&mut rx).await;
+        // Stamp the broker's minted id onto Carl's frame, then classify it
+        // exactly as the dispatch loop would before handing `result` to deliver.
+        let mut frame = frame;
+        frame["id"] = id.clone();
+        match crate::wire::classify(&frame) {
+            crate::wire::Inbound::Response { id, result } => broker.deliver(&id, result),
+            other => panic!("[{provider_id}] expected Response, got {other:?}"),
+        }
+
+        assert_eq!(
+            task.await.unwrap(),
+            PermissionDecision::Denied(PERMISSION_DENIED_MSG),
+            "[{provider_id}] malformed frame must deny, not authorize the tool",
+        );
+        assert_eq!(broker.pending_count(), 0);
+        assert_eq!(broker.available_permits(), 4);
+    }
+
+    /// Carl frame #1: `result` (well-formed `selected`/`allow_once`) AND `error`
+    /// both present. The tool must not run — the ambiguous frame denies.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_frame_with_result_and_error_denies_tool() {
+        assert_malformed_frame_denies(
+            "result+error",
+            json!({
+                "jsonrpc": "2.0",
+                "result": { "outcome": { "outcome": "selected", "optionId": ALLOW_OPTION_ID } },
+                "error": { "code": -32603, "message": "internal" },
+            }),
+        )
+        .await;
+    }
+
+    /// Carl frame #2: present non-string `method: 7` alongside a well-formed
+    /// `selected` `result`. It is not a valid response — the tool must not run.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_frame_with_non_string_method_denies_tool() {
+        assert_malformed_frame_denies(
+            "non-string-method",
+            json!({
+                "jsonrpc": "2.0",
+                "method": 7,
+                "result": { "outcome": { "outcome": "selected", "optionId": ALLOW_OPTION_ID } },
+            }),
+        )
+        .await;
+    }
+
     // ── Stale / unknown id ignored ────────────────────────────────────────────
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

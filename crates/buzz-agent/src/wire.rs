@@ -30,8 +30,12 @@ pub enum Inbound {
     /// A bare JSON-RPC response (id present, no method) — the client's answer
     /// to a request buzz-agent issued. Today the only such request is
     /// `session/request_permission`. `result` carries the JSON-RPC `result`
-    /// field, or `Null` for an `error`/malformed response; every non-`selected`
-    /// shape fails the broker's authorization predicate and denies.
+    /// field ONLY when the frame is a structurally valid response — no `method`
+    /// member and exactly one of `result`/`error`. Any malformed shape (present
+    /// non-string `method`, both `result` and `error`, or neither) is normalized
+    /// to `Null` so a possibly-`selected` payload is never laundered into an
+    /// approval; every non-`selected` shape fails the broker's authorization
+    /// predicate and denies.
     Response {
         id: Value,
         result: Value,
@@ -118,13 +122,26 @@ pub fn classify(msg: &Value) -> Inbound {
         },
         (Some(m), None) => Inbound::Notification { method: m, params },
         // Bare responses (id present, no method) answer a request buzz-agent
-        // issued — today only `session/request_permission`. Route the `result`
-        // (or `Null` on an `error`/absent result) to the permission broker,
-        // which matches it to a live correlation id or ignores it if unknown.
-        (None, Some(id)) => Inbound::Response {
-            id,
-            result: msg.get("result").cloned().unwrap_or(Value::Null),
-        },
+        // issued — today only `session/request_permission`. Route to the
+        // permission broker, which matches a live correlation id or ignores an
+        // unknown one. Forward the `result` ONLY when the frame is a
+        // structurally valid response — the exactly-one-of invariant: no
+        // `method` member at all, and `result` present with `error` absent. A
+        // present non-string `method` (which `as_str` above collapsed to
+        // `None`), both `result` and `error`, or neither is malformed; forward
+        // `Null` so the broker fails closed (deny) rather than laundering a
+        // possibly-`selected` payload into an approval.
+        (None, Some(id)) => {
+            let well_formed = msg.get("method").is_none()
+                && msg.get("result").is_some()
+                && msg.get("error").is_none();
+            let result = if well_formed {
+                msg.get("result").cloned().unwrap_or(Value::Null)
+            } else {
+                Value::Null
+            };
+            Inbound::Response { id, result }
+        }
         (None, None) => Inbound::Invalid {
             id: Value::Null,
             code: INVALID_REQUEST,
@@ -747,6 +764,58 @@ mod tests {
             Inbound::Response { id, result } => {
                 assert_eq!(id, json!("perm-3"));
                 assert_eq!(result, Value::Null, "error/absent result → Null → deny");
+            }
+            other => panic!("expected Response, got {other:?}"),
+        }
+    }
+
+    /// Carl's frame #1: a response carrying BOTH `result` and `error` is
+    /// structurally ambiguous and must NOT deliver the `result`, even when that
+    /// `result` is a well-formed `selected`/`allow_once` payload. The wire layer
+    /// normalizes it to `Null` so the broker denies instead of the frame
+    /// laundering an approval upstream of every fail-closed check.
+    #[test]
+    fn classify_response_with_both_result_and_error_denies() {
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": "perm-3",
+            "result": { "outcome": { "outcome": "selected", "optionId": ALLOW_OPTION_ID } },
+            "error": { "code": -32603, "message": "internal" },
+        });
+        match classify(&msg) {
+            Inbound::Response { id, result } => {
+                assert_eq!(id, json!("perm-3"));
+                assert_eq!(
+                    result,
+                    Value::Null,
+                    "result+error is malformed → Null → deny, never forward the allow payload"
+                );
+            }
+            other => panic!("expected Response, got {other:?}"),
+        }
+    }
+
+    /// Carl's frame #2: a present but non-string `method` is NOT "method
+    /// absent". `as_str` collapses `method: 7` to `None`, which lands the frame
+    /// in the response arm, but it is not a valid response and must not forward
+    /// its `result` (a well-formed `selected` payload here). The structural
+    /// check sees the present `method` member and normalizes to `Null` → deny.
+    #[test]
+    fn classify_response_with_non_string_method_denies() {
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": "perm-3",
+            "method": 7,
+            "result": { "outcome": { "outcome": "selected", "optionId": ALLOW_OPTION_ID } },
+        });
+        match classify(&msg) {
+            Inbound::Response { id, result } => {
+                assert_eq!(id, json!("perm-3"));
+                assert_eq!(
+                    result,
+                    Value::Null,
+                    "present non-string method → not a valid response → Null → deny"
+                );
             }
             other => panic!("expected Response, got {other:?}"),
         }
