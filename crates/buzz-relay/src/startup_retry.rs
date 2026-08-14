@@ -78,16 +78,18 @@ where
         match attempt().await {
             Ok(value) => return Ok(value),
             Err(StartupAttemptError::Permanent { error }) => {
-                return Err(error)
-                    .context(format!("startup dependency {dependency} failed permanently"));
+                return Err(error).context(format!(
+                    "startup dependency {dependency} failed permanently"
+                ));
             }
             Err(StartupAttemptError::Transient { category, error }) => {
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 let delay = retry_delay(&policy, retries, retry_jitter(&policy));
                 if remaining.is_zero() || delay > remaining {
-                    return Err(error).context(format!(
-                        "startup dependency {dependency} exhausted transient {category} retries"
-                    ));
+                    let context = format!(
+                        "startup dependency {dependency} exhausted transient {category} retries: {error}"
+                    );
+                    return Err(error).context(context);
                 }
 
                 tracing::warn!(
@@ -128,7 +130,9 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use super::{retry_delay, retry_startup, StartupAttemptError, StartupErrorCategory, StartupRetryPolicy};
+    use super::{
+        retry_delay, retry_startup, StartupAttemptError, StartupErrorCategory, StartupRetryPolicy,
+    };
 
     fn test_policy(deadline: Duration) -> StartupRetryPolicy {
         StartupRetryPolicy {
@@ -157,23 +161,19 @@ mod tests {
     async fn retries_transient_failures_until_success() {
         let attempts = Arc::new(AtomicUsize::new(0));
         let count = Arc::clone(&attempts);
-        let value = retry_startup(
-            "postgres",
-            test_policy(Duration::from_secs(2)),
-            move || {
-                let attempt = count.fetch_add(1, Ordering::SeqCst) + 1;
-                async move {
-                    if attempt < 3 {
-                        Err(StartupAttemptError::transient(
-                            StartupErrorCategory::Dns,
-                            anyhow::anyhow!("unavailable"),
-                        ))
-                    } else {
-                        Ok(42)
-                    }
+        let value = retry_startup("postgres", test_policy(Duration::from_secs(2)), move || {
+            let attempt = count.fetch_add(1, Ordering::SeqCst) + 1;
+            async move {
+                if attempt < 3 {
+                    Err(StartupAttemptError::transient(
+                        StartupErrorCategory::Dns,
+                        anyhow::anyhow!("unavailable"),
+                    ))
+                } else {
+                    Ok(42)
                 }
-            },
-        )
+            }
+        })
         .await
         .expect("third attempt succeeds");
         assert_eq!(value, 42);
@@ -184,16 +184,17 @@ mod tests {
     async fn permanent_failure_is_not_retried() {
         let attempts = Arc::new(AtomicUsize::new(0));
         let count = Arc::clone(&attempts);
-        let error = retry_startup::<(), _, _>(
-            "postgres",
-            test_policy(Duration::from_secs(2)),
-            move || {
+        let error =
+            retry_startup::<(), _, _>("postgres", test_policy(Duration::from_secs(2)), move || {
                 count.fetch_add(1, Ordering::SeqCst);
-                async { Err(StartupAttemptError::permanent(anyhow::anyhow!("bad config"))) }
-            },
-        )
-        .await
-        .expect_err("permanent error fails");
+                async {
+                    Err(StartupAttemptError::permanent(anyhow::anyhow!(
+                        "bad config"
+                    )))
+                }
+            })
+            .await
+            .expect_err("permanent error fails");
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
         assert!(error.to_string().contains("postgres"));
         assert!(error.to_string().contains("permanent"));
