@@ -2395,7 +2395,9 @@ async fn tokio_main() -> Result<()> {
                     &ctx,
                     &membership_generations,
                     &mut last_activity,
-                ) {
+                )
+                .await
+                {
                     typing_channels.insert(channel_id, thread_tags);
                 }
             }
@@ -2448,7 +2450,9 @@ async fn tokio_main() -> Result<()> {
                 &ctx,
                 &membership_generations,
                 &mut last_activity,
-            ) {
+            )
+            .await
+            {
                 typing_channels.insert(channel_id, thread_tags);
             }
         }
@@ -3033,6 +3037,7 @@ async fn tokio_main() -> Result<()> {
                             if pool_ready {
                                 for (channel_id, thread_tags) in
                                     dispatch_pending(&mut pool, &mut queue, &ctx, &membership_generations, &mut last_activity)
+                                        .await
                                 {
                                     typing_channels.insert(channel_id, thread_tags);
                                 }
@@ -3133,6 +3138,7 @@ async fn tokio_main() -> Result<()> {
                         tracing::debug!("heartbeat_skipped_events");
                         for (channel_id, thread_tags) in
                             dispatch_pending(&mut pool, &mut queue, &ctx, &membership_generations, &mut last_activity)
+                                .await
                         {
                             typing_channels.insert(channel_id, thread_tags);
                         }
@@ -3238,7 +3244,9 @@ async fn tokio_main() -> Result<()> {
                     &ctx,
                     &membership_generations,
                     &mut last_activity,
-                ) {
+                )
+                .await
+                {
                     typing_channels.insert(channel_id, thread_tags);
                 }
             }
@@ -3268,7 +3276,9 @@ async fn tokio_main() -> Result<()> {
                     &ctx,
                     &membership_generations,
                     &mut last_activity,
-                ) {
+                )
+                .await
+                {
                     typing_channels.insert(channel_id, thread_tags);
                 }
             }
@@ -3319,7 +3329,8 @@ async fn tokio_main() -> Result<()> {
                             &membership_generations,
                             &mut last_activity,
                             &mut typing_channels,
-                        );
+                        )
+                        .await;
                     }
                     continue;
                 }
@@ -3341,7 +3352,8 @@ async fn tokio_main() -> Result<()> {
                         &membership_generations,
                         &mut last_activity,
                         &mut typing_channels,
-                    );
+                    )
+                    .await;
                 }
             }
             Some(PoolEvent::SteerAck(SteerAckEvent {
@@ -3524,7 +3536,9 @@ async fn tokio_main() -> Result<()> {
                     &ctx,
                     &membership_generations,
                     &mut last_activity,
-                ) {
+                )
+                .await
+                {
                     typing_channels.insert(channel_id, thread_tags);
                 }
             }
@@ -3556,7 +3570,9 @@ async fn tokio_main() -> Result<()> {
                             &ctx,
                             &membership_generations,
                             &mut last_activity,
-                        ) {
+                        )
+                        .await
+                        {
                             typing_channels.insert(channel_id, thread_tags);
                         }
                     }
@@ -3891,7 +3907,7 @@ fn try_native_steer(
 /// universal cancel+merge fallback, and immediately try dispatch in case the
 /// original turn already ended.
 #[allow(clippy::too_many_arguments)]
-fn release_prepared_native_steer_fallback(
+async fn release_prepared_native_steer_fallback(
     pool: &mut AgentPool,
     queue: &mut EventQueue,
     channel_id: Uuid,
@@ -3913,7 +3929,7 @@ fn release_prepared_native_steer_fallback(
         ControlSignal::Steer,
     );
     for (channel_id, thread_tags) in
-        dispatch_pending(pool, queue, ctx, membership_generations, last_activity)
+        dispatch_pending(pool, queue, ctx, membership_generations, last_activity).await
     {
         typing_channels.insert(channel_id, thread_tags);
     }
@@ -3921,8 +3937,24 @@ fn release_prepared_native_steer_fallback(
 
 // ── dispatch_pending ──────────────────────────────────────────────────────────
 
+fn typing_scope_for_batch(
+    batch: &FlushBatch,
+    resolved_edit: Option<&queue::ResolvedEdit>,
+) -> ThreadTags {
+    resolved_edit
+        .map(queue::ResolvedEdit::reply_thread_tags)
+        .or_else(|| batch.failure_thread_tags.clone())
+        .or_else(|| {
+            batch
+                .events
+                .last()
+                .map(|event| queue::parse_thread_tags(&event.event))
+        })
+        .unwrap_or_default()
+}
+
 /// Flush queued work to available agents.
-fn dispatch_pending(
+async fn dispatch_pending(
     pool: &mut AgentPool,
     queue: &mut EventQueue,
     ctx: &Arc<PromptContext>,
@@ -3936,11 +3968,15 @@ fn dispatch_pending(
             None => break,
         };
         let channel_id = batch.channel_id;
-        let typing_scope = batch
-            .events
-            .last()
-            .map(|event| queue::parse_thread_tags(&event.event))
-            .unwrap_or_default();
+        // Typing indicators are user-visible routing and must share the same
+        // resolved-edit authority as prompts, replies, reactions, and failure
+        // notices. Resolve before spawning the prompt task so the main loop
+        // never briefly advertises an edit-triggered turn at channel scope.
+        let resolved_typing_edit = match batch.events.last() {
+            Some(event) => pool::resolve_edit_routing(&event.event, &ctx.rest_client).await,
+            None => None,
+        };
+        let typing_scope = typing_scope_for_batch(&batch, resolved_typing_edit.as_ref());
         let affinity_hit = pool.has_session_for(channel_id);
         let mut agent = match pool.try_claim(Some(channel_id)) {
             Some(a) => a,
@@ -9074,6 +9110,41 @@ mod native_edit_membership_lifecycle_tests {
         assert_eq!(actual.parent_event_id.as_deref(), Some(parent.as_str()));
     }
 
+    #[test]
+    fn edit_typing_scope_uses_the_resolved_original_thread() {
+        let channel_id = Uuid::new_v4();
+        let target = "ab".repeat(32);
+        let root = "cd".repeat(32);
+        let parent = "ef".repeat(32);
+        let batch = FlushBatch {
+            channel_id,
+            events: vec![queue::BatchEvent {
+                event: edit_event(&target),
+                prompt_tag: "@mention".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+            failure_thread_tags: Some(ThreadTags {
+                root_event_id: Some(target.clone()),
+                parent_event_id: Some(target),
+                mentioned_pubkeys: vec![],
+            }),
+        };
+        let resolved = queue::ResolvedEdit {
+            target_event_id: "12".repeat(32),
+            target_thread_tags: ThreadTags {
+                root_event_id: Some(root.clone()),
+                parent_event_id: Some(parent.clone()),
+                mentioned_pubkeys: vec![],
+            },
+        };
+
+        let actual = typing_scope_for_batch(&batch, Some(&resolved));
+        assert_eq!(actual.root_event_id.as_deref(), Some(root.as_str()));
+        assert_eq!(actual.parent_event_id.as_deref(), Some(parent.as_str()));
+    }
+
     #[tokio::test]
     async fn prepared_native_steer_rejection_releases_and_dispatches_immediately() {
         let channel_id = Uuid::new_v4();
@@ -9103,7 +9174,8 @@ mod native_edit_membership_lifecycle_tests {
             &HashMap::new(),
             &mut last_activity,
             &mut typing_channels,
-        );
+        )
+        .await;
 
         assert!(typing_channels.contains_key(&channel_id));
         assert_eq!(
@@ -9217,13 +9289,17 @@ mod native_edit_membership_lifecycle_tests {
         // drains the reservation and advances generation; re-add restores
         // access without revalidating old prepared work.
         let mut removed_channels = HashSet::new();
-        assert!(remove_channel_for_membership_change(
+        let drained = remove_channel_for_membership_change(
             &mut queue,
             &mut removed_channels,
             &mut generations,
             channel_id,
-        )
-        .is_empty());
+        );
+        assert_eq!(
+            drained,
+            vec!["ab".repeat(32)],
+            "removal returns the reserved edit's visible reaction target"
+        );
         readd_channel_after_membership_change(&mut removed_channels, channel_id);
 
         // This is the completion-arm guard. A false result would enter
