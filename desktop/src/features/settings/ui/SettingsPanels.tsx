@@ -66,7 +66,11 @@ import { ModerationQueueCard } from "./ModerationQueueCard";
 import { NotificationSettingsCard } from "./NotificationSettingsCard";
 import { AgentsSettingsPanel } from "./AgentsSettingsPanel";
 import { HostedCommunitiesSettingsCard } from "./HostedCommunitiesSettingsCard";
-import { SettingsOptionGroup, SettingsOptionRow } from "./SettingsOptionGroup";
+import {
+  SettingsOptionGroup,
+  SettingsOptionGroupList,
+  SettingsOptionRow,
+} from "./SettingsOptionGroup";
 import { ProfileSettingsCard } from "./ProfileSettingsCard";
 import { UpdateChecker } from "../UpdateChecker";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
@@ -623,7 +627,7 @@ function ThemeSettingsCard() {
         description="Choose how Buzz looks and feels."
       />
 
-      <div className="space-y-12">
+      <SettingsOptionGroupList>
         <SettingsOptionGroup
           data-testid="appearance-theme-card"
           description="Theme choices for this community sync across your devices."
@@ -776,7 +780,7 @@ function ThemeSettingsCard() {
           <LinkPreviewStyleSetting />
           <ThreadLayoutSetting />
         </SettingsOptionGroup>
-      </div>
+      </SettingsOptionGroupList>
     </section>
   );
 }
