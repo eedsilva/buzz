@@ -135,13 +135,11 @@ function ComposerSnapshotCard({
   snapshotKind: SnapshotKind;
 }) {
   const [avatarError, setAvatarError] = React.useState(false);
-  const [cardThumbError, setCardThumbError] = React.useState(false);
   const isAgentPng =
     snapshotKind === "agent" &&
     attachment.filename?.toLowerCase().endsWith(".agent.png");
   const avatarUrl = attachment.snapshotAvatarUrl?.trim();
-  const previewThumb = avatarUrl && !avatarError ? avatarUrl : attachment.url;
-  const showThumb = isAgentPng && !cardThumbError;
+  const showThumb = isAgentPng && Boolean(avatarUrl) && !avatarError;
   const SnapshotIcon = snapshotKind === "team" ? Users : Bot;
   const fallbackLabel = snapshotKind === "team" ? "Team" : "Agent";
   const displayName =
@@ -176,14 +174,8 @@ function ComposerSnapshotCard({
               alt=""
               className="h-full w-full object-cover"
               data-testid={`composer-${snapshotKind}-snapshot-thumb`}
-              src={rewriteRelayUrl(previewThumb)}
-              onError={() => {
-                if (avatarUrl && !avatarError) {
-                  setAvatarError(true);
-                } else {
-                  setCardThumbError(true);
-                }
-              }}
+              src={rewriteRelayUrl(avatarUrl ?? "")}
+              onError={() => setAvatarError(true)}
             />
           ) : (
             <SnapshotIcon />

@@ -2642,6 +2642,40 @@ test("agent snapshot composer prefers the avatar while the message keeps the car
   );
   expect(sentContent).not.toContain("thumb ");
 
+  // Older clipboard payloads and restored drafts do not carry the new
+  // composer-only avatar field. The composer should recover it from the
+  // snapshot manifest instead of showing the full trading-card image.
+  const legacyClipboardHtml = copied?.html?.replace(
+    /data-buzz-agent-snapshot="([^"]+)"/u,
+    (_attribute, encodedPayload: string) => {
+      const payload = JSON.parse(decodeURIComponent(encodedPayload));
+      delete payload.avatarUrl;
+      return `data-buzz-agent-snapshot="${encodeURIComponent(JSON.stringify(payload))}"`;
+    },
+  );
+  expect(legacyClipboardHtml).toBeTruthy();
+  await page.evaluate(
+    async ({ html, text }) => {
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          "text/html": new Blob([html ?? ""], { type: "text/html" }),
+          "text/plain": new Blob([text ?? ""], { type: "text/plain" }),
+        }),
+      ]);
+    },
+    { html: legacyClipboardHtml, text: copied?.text },
+  );
+  await page
+    .getByTestId("message-composer")
+    .locator("[contenteditable='true']")
+    .click();
+  await page.keyboard.press("ControlOrMeta+V");
+  const restoredComposerCard = page.getByTestId("composer-agent-snapshot-card");
+  await expect(
+    restoredComposerCard.getByTestId("composer-agent-snapshot-thumb"),
+  ).toHaveAttribute("src", avatarUrl);
+  await page.getByTestId("send-message").click();
+
   await page.getByRole("button", { name: "Attach file" }).click();
   const importedComposerCard = page.getByTestId("composer-agent-snapshot-card");
   await expect(importedComposerCard).toBeVisible();
