@@ -127,3 +127,20 @@ That is the pattern WAV is missing: it checks a prefix, then indexes the
 ORIGINAL buffer past it. Fix shape is one whole-body slice —
 `bytes.get(offset + 8..offset + 24).ok_or(MetadataForbidden)?` — then slice
 the six fields from it. Removes the class, not the instance.
+
+### Reachability witness (added after the sweep itself proved untrustworthy)
+
+The sweep now ships with `fmt_field_checks_are_live`, a black-box witness that
+needs no source instrumentation: mutate `channels` / `block_align` / `bits` in a
+known-good WAV and assert the verdict flips Ok -> Err. It can only pass if those
+bytes are actually read.
+
+Self-tested both directions, which is the only reason to trust it:
+- Against the unfixed validator: witness PASSES, battery FAILS on the
+  `riff-repaired` arm at prefix 22 (and only that arm).
+- With the fmt field checks made inert as a negative control: witness FAILS with
+  "mutating channels did not change the verdict -> field is not read".
+
+**If the witness fails, every "no panic" line below it is vacuous and must not be
+reported as a pass.** That ordering is the whole point — this harness has twice
+produced confident green output while touching nothing.
