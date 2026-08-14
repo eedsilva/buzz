@@ -321,4 +321,40 @@ mod tests {
             RetryDisposition::Permanent
         ));
     }
+
+    #[test]
+    fn redis_io_busy_loading_and_try_again_errors_are_transient() {
+        // A classifier that treats Redis transport or server-recovery errors
+        // as permanent would prevent startup from surviving DNS convergence,
+        // connection loss, or Redis loading its dataset.
+        for kind in [
+            redis::ErrorKind::IoError,
+            redis::ErrorKind::BusyLoadingError,
+            redis::ErrorKind::TryAgain,
+        ] {
+            let error = redis::RedisError::from((kind, "retryable Redis error"));
+            assert!(matches!(
+                classify_redis_error(&error),
+                RetryDisposition::Transient
+            ));
+        }
+    }
+
+    #[test]
+    fn redis_authentication_response_and_type_errors_are_permanent() {
+        // A classifier that retries invalid credentials or invalid Redis
+        // command/response contracts would postpone a startup that requires
+        // an operator or code change to recover.
+        for kind in [
+            redis::ErrorKind::AuthenticationFailed,
+            redis::ErrorKind::ResponseError,
+            redis::ErrorKind::TypeError,
+        ] {
+            let error = redis::RedisError::from((kind, "non-retryable Redis error"));
+            assert!(matches!(
+                classify_redis_error(&error),
+                RetryDisposition::Permanent
+            ));
+        }
+    }
 }
