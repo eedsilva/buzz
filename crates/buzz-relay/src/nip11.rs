@@ -106,7 +106,7 @@ fn relay_limitation(max_message_length: usize) -> RelayLimitation {
 
     RelayLimitation {
         max_message_length: Some(max_message_length as u64),
-        max_subscriptions: Some(1024),
+        max_subscriptions: Some(2048),
         max_filters: Some(10),
         max_limit: Some(buzz_db::DEFAULT_MAX_PAGE_LIMIT as u32),
         max_subid_length: Some(256),

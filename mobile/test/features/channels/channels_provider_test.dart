@@ -34,6 +34,14 @@ void main() {
     expect(chunks.last, hasLength(65));
   });
 
+  test('chunks exact multiples without an empty trailing batch', () {
+    final chunks = chunkChannelsForLastMessageQuery([
+      for (var i = 0; i < 200; i++) _channel(_generatedChannelId(i)),
+    ]);
+
+    expect(chunks.map((chunk) => chunk.length), [100, 100]);
+  });
+
   test('chunks aggregate last-message queries and isolates failures', () async {
     final channelIds = List.generate(201, _generatedChannelId);
     final session =
@@ -282,6 +290,72 @@ void main() {
     expect(result, {_channelA: 20, _channelB: 30});
   });
 
+  test('paced tasks enforce concurrency and requested start spacing', () async {
+    var active = 0;
+    var maxActive = 0;
+    var created = 0;
+    final delays = <Duration>[];
+    final completions = List.generate(12, (_) => Completer<void>());
+    final tasks = [
+      for (var i = 0; i < completions.length; i++)
+        () async {
+          created++;
+          active++;
+          maxActive = max(maxActive, active);
+          await completions[i].future;
+          active--;
+        },
+    ];
+
+    final run = runPacedTasks(
+      tasks,
+      maxConcurrent: 4,
+      startInterval: const Duration(milliseconds: 125),
+      isCancelled: () => false,
+      delay: (duration) async {
+        delays.add(duration);
+      },
+    );
+    await _waitUntil(() => created == 4);
+
+    expect(maxActive, 4);
+    expect(delays, everyElement(const Duration(milliseconds: 125)));
+    expect(delays, hasLength(3));
+
+    for (final completion in completions) {
+      completion.complete();
+    }
+    await run;
+    expect(maxActive, 4);
+    expect(created, 12);
+    expect(delays, hasLength(11));
+  });
+
+  test('readiness timeout cancels the pending subscription', () async {
+    final cancellation = Completer<void>();
+    Duration? armedFor;
+    void Function()? fire;
+    final timer = _TestTimer();
+    final subscription = subscribeWhenReadyWithTimeout(
+      (cancelled) async {
+        await cancelled;
+        throw const RelaySubscriptionCancelledException();
+      },
+      cancellation,
+      timerFactory: (duration, callback) {
+        armedFor = duration;
+        fire = callback;
+        return timer;
+      },
+    );
+
+    expect(armedFor, liveSubscriptionReadyTimeout);
+    expect(cancellation.isCompleted, isFalse);
+    fire!();
+    await expectLater(subscription, throwsA(isA<TimeoutException>()));
+    expect(timer.isActive, isFalse);
+  });
+
   test(
     'paced tasks are lazy, bounded, failure-isolated, and cancellable',
     () async {
@@ -459,6 +533,39 @@ void main() {
       expect(session.totalSubscribeCount, initialSubscribeCount);
       expect(session.unsubscribeCount, 0);
       expect(session.subscribeFilters, hasLength(2));
+    },
+  );
+
+  test(
+    'never-EOSE workers time out and later channels still catch up',
+    () async {
+      final channelIds = List.generate(6, _generatedChannelId);
+      final session = _FakeRelaySession(
+        memberships: [for (final id in channelIds) _membership(id, myPk)],
+        metadata: [for (final id in channelIds) _meta(id: id, name: id)],
+      )..neverReadyChannelIds.addAll(channelIds.take(4));
+      final missedEvent = _message(channelIds.last, createdAt: 50);
+      session.unreadEvents = [missedEvent];
+      final container = _buildContainer(
+        session: session,
+        liveReadyTimeout: Duration.zero,
+      );
+      addTearDown(container.dispose);
+
+      await container.read(channelsProvider.future);
+      await _waitUntil(
+        () =>
+            session.activeChannels.containsAll(channelIds.skip(4)) &&
+            container
+                    .read(channelsProvider.notifier)
+                    .observedUnreadEventsByChannel[channelIds.last]
+                    ?.containsKey(missedEvent.id) ==
+                true,
+        attempts: 30000,
+      );
+
+      expect(session.activeChannels, containsAll(channelIds.skip(4)));
+      expect(session.totalSubscribeCount, channelIds.length);
     },
   );
 
@@ -1186,12 +1293,18 @@ NostrEvent _meta({
   sig: 'sig',
 );
 
-ProviderContainer _buildContainer({required _FakeRelaySession session}) {
+ProviderContainer _buildContainer({
+  required _FakeRelaySession session,
+  Duration liveReadyTimeout = liveSubscriptionReadyTimeout,
+}) {
   return ProviderContainer(
     retry: (_, _) => null,
     overrides: [
       appLifecycleProvider.overrideWith(() => _FakeAppLifecycleNotifier()),
       relaySessionProvider.overrideWith(() => session),
+      channelsLiveSubscriptionReadyTimeoutProvider.overrideWithValue(
+        liveReadyTimeout,
+      ),
       channelsLiveSubscriptionDelayProvider.overrideWithValue(
         (_) => Future<void>.value(),
       ),
@@ -1231,6 +1344,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
   final List<Duration> queryTimeouts = [];
   final Set<int> queryFailureCalls = {};
   final Map<String, int> subscribeFailuresByChannel = {};
+  final Set<String> neverReadyChannelIds = {};
   List<NostrEvent> queryEvents = [];
   int? _pausedQueryCall;
   Completer<void>? _pausedQuery;
@@ -1468,6 +1582,11 @@ class _FakeRelaySession extends RelaySessionNotifier {
     totalSubscribeCount++;
     subscribeFilters.add(filter);
     final channelId = filter.tags['#h']?.single;
+    if (channelId != null && neverReadyChannelIds.contains(channelId)) {
+      if (cancelled == null) return Completer<void Function()>().future;
+      await cancelled;
+      throw const RelaySubscriptionCancelledException();
+    }
     final remainingFailures = channelId == null
         ? 0
         : subscribeFailuresByChannel[channelId] ?? 0;
@@ -1522,6 +1641,19 @@ class _FakeRelaySession extends RelaySessionNotifier {
       listener(event);
     }
   }
+}
+
+class _TestTimer implements Timer {
+  bool _isActive = true;
+
+  @override
+  bool get isActive => _isActive;
+
+  @override
+  int get tick => 0;
+
+  @override
+  void cancel() => _isActive = false;
 }
 
 class _FakeAppLifecycleNotifier extends AppLifecycleNotifier {

@@ -842,6 +842,44 @@ void main() {
   );
 
   test(
+    'subscribeWhenReady retries capacity CLOSED after a bounded cooldown',
+    () async {
+      final timers = <_ManualTimer>[];
+      final socket = _RecordingRelaySocket();
+      final session = RelaySessionNotifier(
+        retryTimerFactory: (duration, callback) {
+          final timer = _ManualTimer(duration, callback);
+          timers.add(timer);
+          return timer;
+        },
+      );
+      session.debugAttachSocketForTest(socket);
+      var ready = false;
+      final subscribe = session
+          .subscribeWhenReady(_channelFilter, (_) {})
+          .whenComplete(() => ready = true);
+
+      session.debugHandleMessage([
+        'CLOSED',
+        'l-1',
+        'error: too many subscriptions',
+      ]);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(ready, isFalse);
+      expect(timers.single.duration, const Duration(seconds: 10));
+      timers.single.fire();
+      await Future<void>.delayed(Duration.zero);
+      expect(_reqs(socket).where((req) => req[1] == 'l-1'), hasLength(2));
+
+      session.debugHandleMessage(['EOSE', 'l-1']);
+      final unsubscribe = await subscribe;
+      expect(ready, isTrue);
+      unsubscribe();
+    },
+  );
+
+  test(
     'subscribeWhenReady cancellation removes the pending subscription',
     () async {
       final timers = <_ManualTimer>[];

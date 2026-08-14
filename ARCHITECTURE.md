@@ -158,7 +158,7 @@ Note: `KIND_AUTH` (22242) is `pub const KIND_AUTH: u32` in `buzz-core/src/kind.r
 | Relay → Client | `["NOTICE", "message"]` | Informational message |
 | Relay → Client | `["AUTH", <challenge>]` | Authentication challenge |
 
-Max frame size: 65,536 bytes. Max subscriptions per connection: 1024. Max historical results per filter: 500.
+Max frame size: 65,536 bytes. Max subscriptions per connection: 2048. Max historical results per filter: 500.
 
 ---
 
@@ -633,7 +633,7 @@ pub enum AuthState { Pending { challenge: String }, Authenticated(AuthContext), 
 | Constant | Value | Purpose |
 |----------|-------|---------|
 | `MAX_FRAME_BYTES` | 65,536 | Max WebSocket frame size |
-| `MAX_SUBSCRIPTIONS` | 1024 | Per-connection subscription limit |
+| `MAX_SUBSCRIPTIONS` | 2048 | Per-connection subscription limit |
 | `MAX_HISTORICAL_LIMIT` | 500 | Per-filter historical query cap |
 | `handler_semaphore` capacity | 1024 | Concurrent EVENT/REQ handlers |
 

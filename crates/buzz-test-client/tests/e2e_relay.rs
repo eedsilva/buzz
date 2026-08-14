@@ -799,7 +799,7 @@ async fn test_auth_event_kind_rejected() {
 /// This is a protocol-cap test, not an admission-throughput test. Open one REQ
 /// at a time and wait out any shared fixed-window quota before retrying a REQ
 /// rejected specifically as `rate-limited`, so production admission remains
-/// enabled while the test deterministically reaches the independent 1024 cap.
+/// enabled while the test deterministically reaches the independent 2048 cap.
 #[tokio::test]
 #[ignore]
 async fn test_subscription_limit_enforced() {
@@ -807,7 +807,7 @@ async fn test_subscription_limit_enforced() {
     let keys = Keys::generate();
     let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
 
-    for i in 0..1024 {
+    for i in 0..2048 {
         let sid = format!("limit-sub-{i}");
         let filter = Filter::new().kind(Kind::Custom(49_999));
         subscribe_until_eose(&mut client, &sid, filter).await;
@@ -914,8 +914,8 @@ async fn test_nip11_relay_info() {
     let limitation = body.get("limitation").expect("Missing 'limitation' field");
     assert_eq!(
         limitation.get("max_subscriptions").and_then(|v| v.as_u64()),
-        Some(1024),
-        "limitation.max_subscriptions must be 1024"
+        Some(2048),
+        "limitation.max_subscriptions must be 2048"
     );
     // The REQ, EVENT, and COUNT handlers unconditionally require an
     // authenticated connection, so the NIP-11 doc must advertise that.
