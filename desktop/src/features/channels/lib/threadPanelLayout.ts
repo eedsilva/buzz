@@ -7,10 +7,14 @@ export type ThreadPanelLayoutProps = {
   columnMaxWidthPx?: number;
   enterMotion?: boolean;
   headerLeading?: React.ReactNode;
+  /** Replaces the default "Thread" label. Channel threads leave this unset. */
+  headerTitle?: string;
+  headerTitleAriaLabel?: string;
   isFocusMode: boolean;
   isSinglePanelView?: boolean;
   layout?: "standalone" | "split";
   showBackButton?: boolean;
+  onHeaderTitleClick?: () => void;
   onResetWidth?: () => void;
   onResizeStart?: React.PointerEventHandler<HTMLButtonElement>;
   splitPaneClamp?: boolean;

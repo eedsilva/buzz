@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import * as React from "react";
 
+import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import {
   useChannelMembersQuery,
   useChannelsQuery,
@@ -48,9 +49,12 @@ export function ProjectConversationPanel({
   onResizeStart: (event: React.PointerEvent<HTMLButtonElement>) => void;
   widthPx: number;
 }) {
+  const { goChannel } = useAppNavigation();
   const channelsQuery = useChannelsQuery();
   const activeChannel =
     channelsQuery.data?.find((channel) => channel.id === hit.channelId) ?? null;
+  const channelId = activeChannel?.id ?? hit.channelId ?? null;
+  const channelLabel = activeChannel?.name ?? hit.channelName ?? null;
   const identityQuery = useIdentityQuery();
   const profileQuery = useProfileQuery();
   const membersQuery = useChannelMembersQuery(activeChannel?.id ?? null);
@@ -183,12 +187,18 @@ export function ProjectConversationPanel({
           threadRepliesQuery.isFetched &&
           appliedExpansionKey !== expansionKey,
       ));
+  const openChannel = React.useCallback(() => {
+    if (channelId) void goChannel(channelId);
+  }, [channelId, goChannel]);
   const layoutProps = {
     canResetWidth,
     enterMotion: !canShowThread,
+    headerTitle: channelLabel ? `#${channelLabel}` : "Thread",
+    headerTitleAriaLabel: channelLabel ? `Open #${channelLabel}` : undefined,
     isFocusMode: false,
     isSinglePanelView: !isOverlay,
     layout: "standalone" as const,
+    onHeaderTitleClick: channelId ? openChannel : undefined,
     onResetWidth,
     onResizeStart,
     showBackButton: false,

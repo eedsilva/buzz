@@ -20,17 +20,38 @@ import { Skeleton } from "@/shared/ui/skeleton";
 /** Shared title row so the skeleton and loaded panel keep the same chrome. */
 export function MessageThreadPanelHeader({
   headerLeading,
+  headerTitle = "Thread",
+  headerTitleAriaLabel,
   isFocusMode,
   isSinglePanelView,
   onClose,
+  onHeaderTitleClick,
   showBackButton,
 }: {
   headerLeading?: React.ReactNode;
+  headerTitle?: string;
+  headerTitleAriaLabel?: string;
   isFocusMode: boolean;
   isSinglePanelView: boolean;
   onClose: () => void;
+  onHeaderTitleClick?: () => void;
   showBackButton?: boolean;
 }) {
+  const title = onHeaderTitleClick ? (
+    <button
+      aria-label={headerTitleAriaLabel ?? `Open ${headerTitle}`}
+      className="min-w-0 max-w-full truncate text-left hover:underline"
+      data-testid="message-thread-open-channel"
+      onClick={onHeaderTitleClick}
+      title={headerTitleAriaLabel ?? `Open ${headerTitle}`}
+      type="button"
+    >
+      {headerTitle}
+    </button>
+  ) : (
+    headerTitle
+  );
+
   return (
     <AuxiliaryPanelHeader backdrop>
       <AuxiliaryPanelHeaderGroup
@@ -45,7 +66,7 @@ export function MessageThreadPanelHeader({
             : undefined
         }
       >
-        <AuxiliaryPanelTitle>Thread</AuxiliaryPanelTitle>
+        <AuxiliaryPanelTitle>{title}</AuxiliaryPanelTitle>
       </AuxiliaryPanelHeaderGroup>
     </AuxiliaryPanelHeader>
   );
@@ -134,10 +155,13 @@ export function MessageThreadPanelSkeleton({
   columnMaxWidthPx,
   enterMotion,
   headerLeading,
+  headerTitle,
+  headerTitleAriaLabel,
   isFocusMode,
   isSinglePanelView = false,
   layout = "standalone",
   onClose,
+  onHeaderTitleClick,
   onResetWidth,
   onResizeStart,
   showBackButton,
@@ -194,9 +218,12 @@ export function MessageThreadPanelSkeleton({
       header={
         <MessageThreadPanelHeader
           headerLeading={headerLeading}
+          headerTitle={headerTitle}
+          headerTitleAriaLabel={headerTitleAriaLabel}
           isFocusMode={isFocusMode}
           isSinglePanelView={isSinglePanelView}
           onClose={onClose}
+          onHeaderTitleClick={onHeaderTitleClick}
           showBackButton={showBackButton}
         />
       }

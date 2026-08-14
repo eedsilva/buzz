@@ -199,6 +199,8 @@ export function MessageThreadPanel({
   editTarget,
   enterMotion,
   headerLeading,
+  headerTitle,
+  headerTitleAriaLabel,
   isSending,
   isFocusMode,
   isSinglePanelView = false,
@@ -207,6 +209,7 @@ export function MessageThreadPanel({
   onCancelEdit,
   onCancelReply,
   onClose,
+  onHeaderTitleClick,
   onResetWidth,
   onResizeStart,
   onDelete,
@@ -967,9 +970,12 @@ export function MessageThreadPanel({
           isHuddleTranscript ? undefined : (
             <MessageThreadPanelHeader
               headerLeading={headerLeading}
+              headerTitle={headerTitle}
+              headerTitleAriaLabel={headerTitleAriaLabel}
               isFocusMode={isFocusMode}
               isSinglePanelView={isSinglePanelView}
               onClose={onClose}
+              onHeaderTitleClick={onHeaderTitleClick}
               showBackButton={showBackButton}
             />
           )
