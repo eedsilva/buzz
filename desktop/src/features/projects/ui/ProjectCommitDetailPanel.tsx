@@ -115,7 +115,10 @@ export function ProjectCommitDetailPanel({
           </div>
         </div>
         {diff?.commitBody ? (
-          <ProjectRichContent content={diff.commitBody} />
+          <ProjectRichContent
+            content={diff.commitBody}
+            hardLineBreaks={false}
+          />
         ) : null}
         <DiscussedInChannels
           entityLabel="this commit"

@@ -71,14 +71,14 @@ function useChannelNameLookup(enabled: boolean) {
 }
 
 /**
- * "Channels" card for PR, issue, and commit detail views: a bordered,
- * softly tinted block with a small header that separates it from the
- * surrounding text. Each channel gets a single truncating line —
+ * "Related Conversations" card for PR, issue, and commit detail views: a
+ * bordered, softly tinted block with a small header that separates it from
+ * the surrounding text. Each channel gets a single truncating line —
  * "Alice, Bob and Carol discussed this in #channel · 2h ago — snippet…" —
  * cut at the card edge regardless of screen width. Clicking the snippet
- * jumps to that message (thread-aware), the same way inbox items do.
- * Renders nothing until at least one channel references the entity, so
- * the detail layout stays unchanged for undiscussed items.
+ * opens the conversation panel (forum hits still jump in-place). Renders
+ * nothing until at least one channel references the entity, so the detail
+ * layout stays unchanged for undiscussed items.
  */
 export function DiscussedInChannels({
   className,
@@ -130,7 +130,7 @@ export function DiscussedInChannels({
       data-testid={testId}
     >
       <h4 className="border-b border-border/40 px-3 py-1.5 text-2xs font-semibold uppercase tracking-wide text-muted-foreground">
-        Channels
+        Related Conversations
       </h4>
       <div className="divide-y divide-border/40">
         {visible.map((channel) => {
@@ -202,7 +202,8 @@ export function DiscussedInChannels({
           onClick={() => setExpanded(true)}
           type="button"
         >
-          Show {hiddenCount} more {hiddenCount === 1 ? "channel" : "channels"}
+          Show {hiddenCount} more{" "}
+          {hiddenCount === 1 ? "conversation" : "conversations"}
         </button>
       ) : null}
       {isTruncated ? (
