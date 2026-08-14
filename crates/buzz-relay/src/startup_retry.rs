@@ -1,3 +1,127 @@
+use std::fmt;
+use std::future::Future;
+use std::time::Duration;
+
+use anyhow::Context;
+use tokio::time::Instant;
+
+pub(crate) struct StartupRetryPolicy {
+    pub(crate) deadline: Duration,
+    pub(crate) initial_delay: Duration,
+    pub(crate) max_delay: Duration,
+    pub(crate) max_jitter: Duration,
+}
+
+impl StartupRetryPolicy {
+    pub(crate) const fn production() -> Self {
+        Self {
+            deadline: Duration::from_secs(120),
+            initial_delay: Duration::from_millis(250),
+            max_delay: Duration::from_secs(5),
+            max_jitter: Duration::from_millis(250),
+        }
+    }
+}
+
+pub(crate) enum StartupErrorCategory {
+    Dns,
+    ConnectionRefused,
+    Timeout,
+    BackendUnavailable,
+}
+
+impl fmt::Display for StartupErrorCategory {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let category = match self {
+            Self::Dns => "dns",
+            Self::ConnectionRefused => "connection_refused",
+            Self::Timeout => "timeout",
+            Self::BackendUnavailable => "backend_unavailable",
+        };
+        formatter.write_str(category)
+    }
+}
+
+pub(crate) enum StartupAttemptError {
+    Transient {
+        category: StartupErrorCategory,
+        error: anyhow::Error,
+    },
+    Permanent {
+        error: anyhow::Error,
+    },
+}
+
+impl StartupAttemptError {
+    pub(crate) fn transient(category: StartupErrorCategory, error: anyhow::Error) -> Self {
+        Self::Transient { category, error }
+    }
+
+    pub(crate) fn permanent(error: anyhow::Error) -> Self {
+        Self::Permanent { error }
+    }
+}
+
+pub(crate) async fn retry_startup<T, F, Fut>(
+    dependency: &'static str,
+    policy: StartupRetryPolicy,
+    mut attempt: F,
+) -> anyhow::Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, StartupAttemptError>>,
+{
+    let deadline = Instant::now() + policy.deadline;
+    let mut retries = 0;
+
+    loop {
+        match attempt().await {
+            Ok(value) => return Ok(value),
+            Err(StartupAttemptError::Permanent { error }) => {
+                return Err(error)
+                    .context(format!("startup dependency {dependency} failed permanently"));
+            }
+            Err(StartupAttemptError::Transient { category, error }) => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                let delay = retry_delay(&policy, retries, retry_jitter(&policy));
+                if remaining.is_zero() || delay > remaining {
+                    return Err(error).context(format!(
+                        "startup dependency {dependency} exhausted transient {category} retries"
+                    ));
+                }
+
+                tracing::warn!(
+                    dependency,
+                    attempt = retries + 1,
+                    category = %category,
+                    next_delay_ms = delay.as_millis(),
+                    "startup dependency retry scheduled"
+                );
+                tokio::time::sleep(delay).await;
+                retries += 1;
+            }
+        }
+    }
+}
+
+fn retry_delay(policy: &StartupRetryPolicy, retries: u32, jitter: Duration) -> Duration {
+    let multiplier = 1_u32.checked_shl(retries.min(31)).unwrap_or(u32::MAX);
+    policy
+        .initial_delay
+        .saturating_mul(multiplier)
+        .min(policy.max_delay)
+        .saturating_add(jitter)
+}
+
+fn retry_jitter(policy: &StartupRetryPolicy) -> Duration {
+    if policy.max_jitter.is_zero() {
+        return Duration::ZERO;
+    }
+
+    let jitter_nanos = policy.max_jitter.as_nanos().min(u64::MAX.into()) as u64;
+    Duration::from_nanos(rand::random::<u64>() % jitter_nanos.saturating_add(1))
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
