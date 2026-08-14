@@ -40,9 +40,7 @@ pub(crate) fn classify_redis_error(error: &redis::RedisError) -> RetryDispositio
     }
 }
 
-pub(crate) fn classify_redis_pool_error(
-    error: &deadpool_redis::PoolError,
-) -> RetryDisposition {
+pub(crate) fn classify_redis_pool_error(error: &deadpool_redis::PoolError) -> RetryDisposition {
     match error {
         deadpool_redis::PoolError::Timeout(_) => RetryDisposition::Transient,
         deadpool_redis::PoolError::Backend(error) => classify_redis_error(error),
@@ -110,10 +108,7 @@ impl StartupAttemptError {
 pub(crate) async fn verify_redis_startup(
     pool: &deadpool_redis::Pool,
 ) -> Result<(), StartupAttemptError> {
-    let mut connection = pool
-        .get()
-        .await
-        .map_err(redis_pool_startup_attempt_error)?;
+    let mut connection = pool.get().await.map_err(redis_pool_startup_attempt_error)?;
     let response = redis::cmd("PING")
         .query_async::<String>(&mut connection)
         .await

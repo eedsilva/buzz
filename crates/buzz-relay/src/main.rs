@@ -218,7 +218,11 @@ async fn main() -> anyhow::Result<()> {
     let db = retry_startup(
         "postgres-writer",
         StartupRetryPolicy::production(),
-        || async { Db::new(&db_config).await.map_err(startup_attempt_error_from_db) },
+        || async {
+            Db::new(&db_config)
+                .await
+                .map_err(startup_attempt_error_from_db)
+        },
     )
     .await
     .map_err(|e| {
